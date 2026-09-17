@@ -1,0 +1,36 @@
+{
+  "mux": {
+    "enabled": false
+  },
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "203.0.113.11",
+        "port": 443,
+        "users": [
+          {
+            "encryption": "mlkem768x25519plus.native.0rtt.FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE",
+            "id": "00000000-0000-4000-8000-000000000002"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "xhttp",
+    "realitySettings": {
+      "fingerprint": "firefox",
+      "mldsa65Verify": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      "publicKey": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "serverName": "example.org",
+      "shortId": "cafebabe89abcdef",
+      "spiderX": "/"
+    },
+    "security": "reality",
+    "xhttpSettings": {
+      "host": "example.org"
+    }
+  },
+  "tag": "proxy"
+}

@@ -1,0 +1,48 @@
+{
+  "_comment": "Ссылки и эталонные значения для golden-тестов паритета (план, 5.7). Эталонный outbound-блок сгенерирован Linux-бэкендом (~/src/vless-tunnel, vless-tunnel.sh py_backend, версия v1.2.9) и лежит рядом в *.outbound.json. UUID/ключи — фейковые (не из реальных ссылок).",
+  "core_version": "v26.3.27",
+  "linux_backend_version": "v1.2.9",
+  "valid": [
+    {
+      "name": "reality-vision-tcp",
+      "link": "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?security=reality&flow=xtls-rprx-vision&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=deadbeef01234567&sni=example.com&type=tcp#test-vision",
+      "outbound_file": "reality-vision-tcp.outbound.json"
+    },
+    {
+      "name": "reality-pqv-xhttp",
+      "link": "vless://00000000-0000-4000-8000-000000000002@203.0.113.11:443?encryption=mlkem768x25519plus.native.0rtt.FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE&security=reality&sni=example.org&fp=firefox&pbk=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB&sid=cafebabe89abcdef&spx=%2F&pqv=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC&type=xhttp#test-pqv",
+      "outbound_file": "reality-pqv-xhttp.outbound.json"
+    },
+    {
+      "name": "ws-tls",
+      "link": "vless://00000000-0000-4000-8000-000000000003@ws.example.com:443?security=tls&type=ws&path=%2Fpath&host=ws.example.com&sni=ws.example.com&alpn=h2,http%2F1.1#test-ws",
+      "outbound_file": "ws-tls.outbound.json"
+    },
+    {
+      "name": "grpc-multi-none",
+      "link": "vless://00000000-0000-4000-8000-000000000004@grpc.example.com:443?type=grpc&mode=multi&serviceName=svc1#test-grpc",
+      "outbound_file": "grpc-multi-none.outbound.json"
+    },
+    {
+      "name": "ipv6-host-reality",
+      "link": "vless://00000000-0000-4000-8000-000000000005@[2001:db8::1]:443?security=reality&fp=chrome&pbk=DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD&sid=0011223344556677&sni=example.net&type=tcp#test-ipv6",
+      "outbound_file": "ipv6-host-reality.outbound.json"
+    },
+    {
+      "name": "vision-udp443-off",
+      "link": "vless://00000000-0000-4000-8000-000000000006@203.0.113.12:443?security=reality&flow=xtls-rprx-vision&fp=chrome&pbk=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE&sid=1122334455667788&sni=example.com&type=tcp#test-vision-off",
+      "outbound_file": "vision-udp443-off.outbound.json",
+      "options": { "visionUdp443": false }
+    }
+  ],
+  "broken": [
+    { "name": "broken-no-scheme-no-at", "link": "not-a-link-at-all", "error_contains": "vless://" },
+    { "name": "broken-no-uuid", "link": "vless://@203.0.113.10:443", "error_contains": "UUID" },
+    { "name": "broken-no-host", "link": "vless://00000000-0000-4000-8000-000000000001@:443", "error_contains": "адрес сервера" },
+    { "name": "broken-bad-port", "link": "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:99999", "error_contains": "порт" },
+    { "name": "broken-unknown-network", "link": "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?type=carrierpigeon", "error_contains": "транспорт" },
+    { "name": "broken-flow-without-security", "link": "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?flow=xtls-rprx-vision", "error_contains": "flow" },
+    { "name": "broken-reality-no-pbk", "link": "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?security=reality", "error_contains": "publicKey" },
+    { "name": "broken-reality-bad-network", "link": "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&type=kcp", "error_contains": "REALITY" }
+  ]
+}

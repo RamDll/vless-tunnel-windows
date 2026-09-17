@@ -1,0 +1,29 @@
+{
+  "mux": {
+    "enabled": false
+  },
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "grpc.example.com",
+        "port": 443,
+        "users": [
+          {
+            "encryption": "none",
+            "id": "00000000-0000-4000-8000-000000000004"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "grpcSettings": {
+      "multiMode": true,
+      "serviceName": "svc1"
+    },
+    "network": "grpc",
+    "security": "none"
+  },
+  "tag": "proxy"
+}

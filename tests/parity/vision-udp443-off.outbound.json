@@ -1,0 +1,33 @@
+{
+  "mux": {
+    "enabled": false
+  },
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "203.0.113.12",
+        "port": 443,
+        "users": [
+          {
+            "encryption": "none",
+            "flow": "xtls-rprx-vision",
+            "id": "00000000-0000-4000-8000-000000000006"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "realitySettings": {
+      "fingerprint": "chrome",
+      "publicKey": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+      "serverName": "example.com",
+      "shortId": "1122334455667788",
+      "spiderX": "/"
+    },
+    "security": "reality"
+  },
+  "tag": "proxy"
+}
