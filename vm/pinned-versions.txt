@@ -21,3 +21,13 @@ sublayer_guid = f5e23d33-098e-444a-a312-7b190a764453
 # Альтернатива (правила брандмауэра Windows, если выбор в 3.9 падёт на них
 # вместо WFP) — общая группа для New-NetFirewallRule, тоже снимается rescue.ps1:
 firewall_rule_group = vless-tunnel
+
+[xray-core-windows]
+# Для этапа 0б (спайк) и дальнейшей разработки — win-64 релиз, содержит
+# xray.exe + geoip.dat/geosite.dat + wintun.dll (планом было верно
+# предположено, что они идут в одном архиве).
+version = v26.3.27
+url = https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip
+sha256 = d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad
+# Официально опубликован издателем (.dgst рядом с релизом) — в отличие от
+# virtio-win, здесь sha256 подтверждён самим XTLS/Xray-core, не только нами.
