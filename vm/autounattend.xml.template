@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Шаблон безучастной установки Windows 10 22H2 Pro (индекс 4 в install.wim
+  на этом ISO — проверено wimlib-imagex info) для стенда раздела 5 плана.
+  {{ADMIN_PASSWORD}} подставляется create-vm.sh из
+  ~/.config/vless-tunnel-dev/vm-admin-password.txt при сборке ISO с ответом
+  на установку. Сам файл с паролем в репозиторий не попадает.
+
+  Диск — SATA (не virtio-blk), сеть — e1000e (не virtio-net): оба драйвера
+  встроены в Windows 10, поэтому не нужна инъекция драйверов в фазе
+  windowsPE (Microsoft-Windows-PnpCustomizationWinPE), что было бы
+  дополнительным источником хрупкости. virtio-win ISO используется только
+  после установки — для qemu-guest-agent (setup-guest.ps1).
+
+  Прошивка — SeaBIOS (не UEFI): раздел диска MBR, не GPT (см. план 5.2 —
+  ради внутренних снимков qcow2).
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64"
+                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <SetupUILanguage>
+        <UILanguage>ru-RU</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>ru-RU</InputLocale>
+      <SystemLocale>ru-RU</SystemLocale>
+      <UILanguage>ru-RU</UILanguage>
+      <UserLocale>ru-RU</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64"
+                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <!-- Публичный generic KMS client setup key для Windows 10 Pro (Microsoft),
+             нужен только чтобы Setup не спрашивал ключ интерактивно; активация
+             тестовую VM не касается. -->
+        <ProductKey>
+          <Key>VK7JG-NPHTM-C97JM-9MPGT-3V66T</Key>
+          <WillShowUI>OnError</WillShowUI>
+        </ProductKey>
+      </UserData>
+
+      <DiskConfiguration>
+        <WillShowUI>OnError</WillShowUI>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order>
+              <Type>Primary</Type>
+              <Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order>
+              <PartitionID>1</PartitionID>
+              <Format>NTFS</Format>
+              <Label>Windows</Label>
+              <Active>true</Active>
+              <Letter>C</Letter>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/INDEX</Key>
+              <Value>4</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo>
+            <DiskID>0</DiskID>
+            <PartitionID>1</PartitionID>
+          </InstallTo>
+          <WillShowUI>OnError</WillShowUI>
+        </OSImage>
+      </ImageInstall>
+    </component>
+  </settings>
+
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>VT-WIN10</ComputerName>
+      <TimeZone>Russian Standard Time</TimeZone>
+    </component>
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64"
+                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>ru-RU</InputLocale>
+      <SystemLocale>ru-RU</SystemLocale>
+      <UILanguage>ru-RU</UILanguage>
+      <UserLocale>ru-RU</UserLocale>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+        <SkipUserOOBE>true</SkipUserOOBE>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+      </OOBE>
+      <!-- Автологин сознательно не включаем (урок владельца) — sshd работает
+           как служба LocalSystem и не требует интерактивного входа. -->
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>vtadmin</Name>
+            <Group>Administrators</Group>
+            <Password>
+              <Value>{{ADMIN_PASSWORD}}</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+    </component>
+
+    <!-- Выполняется от SYSTEM сразу после создания учётки, без интерактивного
+         входа: ищет vt-setup-guest.ps1 на подключённом ISO с ресурсами
+         (буква диска заранее не известна — CD-ROM с виртуалкой может
+         получить любую из D:..H:) и запускает его. Сам скрипт в конце
+         выключает машину — это сигнал хосту (create-vm.sh), что установка
+         завершена (план, 3.9 / 5.2). -->
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64"
+                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>cmd.exe /c for %d in (D E F G H) do if exist %d:\vt-setup-guest.ps1 powershell.exe -NoProfile -ExecutionPolicy Bypass -File %d:\vt-setup-guest.ps1 -ResourceDrive %d:</Path>
+          <Description>vt-setup-guest.ps1</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+
+</unattend>
