@@ -1,12 +1,15 @@
-# Первичная настройка Windows внутри vt-win10 (план, раздел 5.2).
-# Запускается от SYSTEM синхронно из oobeSystem-прохода autounattend.xml,
-# без интерактивного входа. В конце выключает машину — это сигнал хосту
-# (create-vm.sh), что установка завершена.
+﻿# Первичная настройка Windows внутри vt-win10 (план, раздел 5.2).
+# Запускается через FirstLogonCommands при автологине vtadmin (единственный
+# рабочий механизм из проверенных — RunSynchronousCommand в specialize и в
+# oobeSystem регистрировался, но не выполнялся; $OEM$\$1\ тоже не работает
+# для установки без WDS/MDT — Setup копирует такую папку на C:\ только с
+# самого install-ISO, не со второго CD-ROM). Файлы (rescue.ps1, run-test.ps1,
+# authorized_key.pub, и сам этот скрипт) лежат в корне ресурсного ISO;
+# -ResourceDrive — буква, под которой этот CD-ROM оказался на этот раз (её
+# заранее не угадать, ищет вызывающий cmd-однострочник в autounattend.xml).
+# В конце выключает машину — сигнал хосту (create-vm.sh), что всё готово.
 #
-# Параметр -ResourceDrive — буква диска (например "D:") с этим же ISO
-# (ресурсным), где лежат vt-setup-guest.ps1, rescue.ps1, run-test.ps1 и
-# authorized_key.pub. Сам virtio-win ISO — отдельный CD-ROM, его букву
-# скрипт ищет сам (заранее не известна).
+# virtio-win ISO — отдельный CD-ROM, его букву ищем по факту тем же способом.
 
 param(
     [Parameter(Mandatory = $true)]
@@ -14,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+$ToolsDir = $ResourceDrive
 New-Item -ItemType Directory -Force -Path 'C:\dev\logs', 'C:\dev\secrets', 'C:\dev\bin' | Out-Null
 Start-Transcript -Path 'C:\dev\logs\setup-guest.log' -Append
 
@@ -69,7 +73,7 @@ Step 'OpenSSH Server' {
 }
 
 Step 'SSH-ключ администратора' {
-    $keyFile = "$ResourceDrive\authorized_key.pub"
+    $keyFile = "$ToolsDir\authorized_key.pub"
     if (-not (Test-Path $keyFile)) { throw "authorized_key.pub not found at $keyFile" }
     New-Item -ItemType Directory -Force -Path 'C:\ProgramData\ssh' | Out-Null
     $dest = 'C:\ProgramData\ssh\administrators_authorized_keys'
@@ -86,16 +90,6 @@ Step 'Питание: без сна/гибернации' {
     powercfg /hibernate off
 }
 
-Step 'Windows Update: пауза' {
-    # Пауза через API нестабильна между билдами; проще и надёжнее для
-    # одноразового тестового стенда — отключить службу целиком.
-    New-Item -ItemType Directory -Force -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' | Out-Null
-    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' `
-        -Name 'NoAutoRebootWithLoggedOnUsers' -Value 1 -Type DWord
-    Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
-    Set-Service wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
-}
-
 Step 'Defender: исключить C:\dev' {
     $ok = $false
     for ($i = 0; $i -lt 5 -and -not $ok; $i++) {
@@ -110,8 +104,8 @@ Step 'Defender: исключить C:\dev' {
 }
 
 Step 'Копирование rescue.ps1 / run-test.ps1 в C:\dev\bin' {
-    Copy-Item "$ResourceDrive\rescue.ps1" 'C:\dev\bin\rescue.ps1' -Force
-    Copy-Item "$ResourceDrive\run-test.ps1" 'C:\dev\bin\run-test.ps1' -Force
+    Copy-Item "$ToolsDir\rescue.ps1" 'C:\dev\bin\rescue.ps1' -Force
+    Copy-Item "$ToolsDir\run-test.ps1" 'C:\dev\bin\run-test.ps1' -Force
 }
 
 Write-Host 'RESULT: SETUP-GUEST DONE'

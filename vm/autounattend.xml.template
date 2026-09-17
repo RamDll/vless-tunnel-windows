@@ -115,8 +115,23 @@
         <SkipUserOOBE>true</SkipUserOOBE>
         <SkipMachineOOBE>true</SkipMachineOOBE>
       </OOBE>
-      <!-- Автологин сознательно не включаем (урок владельца) — sshd работает
-           как служба LocalSystem и не требует интерактивного входа. -->
+      <!-- Microsoft-Windows-Deployment/RunSynchronousCommand в этом образе
+           не работает ни в specialize (жёсткая ошибка парсинга), ни в
+           oobeSystem (тихо игнорируется — по setupact.log обработчик
+           SETUPUGC.EXE для oobeSystem поддерживает только
+           ExtendOSPartition). Рабочий путь — FirstLogonCommands, а для
+           него нужен хотя бы один вход. По просьбе владельца автологин —
+           постоянный (это стенд для разработки, не продукт), не
+           одноразовый: вводить пароль каждый раз на консоли неудобно. -->
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <Username>vtadmin</Username>
+        <LogonCount>999999</LogonCount>
+        <Password>
+          <Value>{{ADMIN_PASSWORD}}</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
       <UserAccounts>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
@@ -129,23 +144,22 @@
           </LocalAccount>
         </LocalAccounts>
       </UserAccounts>
-    </component>
-
-    <!-- Выполняется от SYSTEM сразу после создания учётки, без интерактивного
-         входа: ищет vt-setup-guest.ps1 на подключённом ISO с ресурсами
-         (буква диска заранее не известна — CD-ROM с виртуалкой может
-         получить любую из D:..H:) и запускает его. Сам скрипт в конце
-         выключает машину — это сигнал хосту (create-vm.sh), что установка
-         завершена (план, 3.9 / 5.2). -->
-    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64"
-                publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
+      <FirstLogonCommands>
+        <!-- Живьём проверено на этой же машине: файл на ресурсном ISO точно
+             есть и по правильному пути запускается без проблем — три
+             прошлые неудачи были из-за отсутствия BOM в .ps1 (правился
+             отдельно) и/или из-за $OEM$\$1\, который не работает для
+             установки без WDS/MDT (Windows копирует такую папку на C:\
+             только с самого install-ISO, не со второго CD-ROM — проверено
+             офлайн-чтением диска дважды). Минимальный синтаксис команды —
+             намеренно без &/скобок/>> — они однажды уже валили разбор
+             файла ответов. -->
+        <SynchronousCommand wcm:action="add">
           <Order>1</Order>
-          <Path>cmd.exe /c for %d in (D E F G H) do if exist %d:\vt-setup-guest.ps1 powershell.exe -NoProfile -ExecutionPolicy Bypass -File %d:\vt-setup-guest.ps1 -ResourceDrive %d:</Path>
+          <CommandLine>cmd.exe /c for %d in (C D E F G H I J) do if exist %d:\vt-setup-guest.ps1 powershell.exe -NoProfile -ExecutionPolicy Bypass -File %d:\vt-setup-guest.ps1 -ResourceDrive %d:</CommandLine>
           <Description>vt-setup-guest.ps1</Description>
-        </RunSynchronousCommand>
-      </RunSynchronous>
+        </SynchronousCommand>
+      </FirstLogonCommands>
     </component>
   </settings>
 

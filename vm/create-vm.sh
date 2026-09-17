@@ -55,6 +55,14 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 ADMIN_PASSWORD="$(cat "$SECDIR/vm-admin-password.txt")"
 sed "s|{{ADMIN_PASSWORD}}|$ADMIN_PASSWORD|" "$SCRIPT_DIR/autounattend.xml.template" > "$TMPDIR/autounattend.xml"
+
+# $OEM$\$1\ НЕ РАБОТАЕТ для нашего сценария (проверено эмпирически дважды:
+# офлайн-чтение диска показывает, что Windows Setup копирует такую папку на
+# C:\ только когда она лежит на самом установочном ISO рядом с sources\, а
+# не на отдельном втором CD-ROM с ответным файлом — так что для обычной
+# установки без WDS/MDT это тупик). Файлы лежат прямо в корне ресурсного
+# ISO; FirstLogonCommands сам перебирает буквы дисков (проверено вживую —
+# файл точно находится и запускается, когда путь угадан правильно).
 cp "$SCRIPT_DIR/setup-guest.ps1" "$TMPDIR/vt-setup-guest.ps1"
 cp "$SCRIPT_DIR/rescue.ps1" "$TMPDIR/rescue.ps1"
 cp "$SCRIPT_DIR/run-test.ps1" "$TMPDIR/run-test.ps1"
@@ -63,18 +71,24 @@ cp "$SECDIR/vt_vm_ed25519.pub" "$TMPDIR/authorized_key.pub"
 genisoimage -quiet -o "$RESOURCE_ISO" -V VTRES -J -r "$TMPDIR"
 log "Ресурсный ISO собран: $RESOURCE_ISO"
 
-log "virt-install: BIOS/SeaBIOS, диск SATA, сеть e1000e (встроенные драйверы, без инъекции в windowsPE — план 5.2)"
+log "virt-install: BIOS/SeaBIOS, все диски на одной шине SATA с явным boot_order (сеть e1000e — встроенные драйверы, без инъекции в windowsPE, план 5.2)"
+# Важно: все диски/CD-ROM на ОДНОЙ шине (sata), с явным boot_order на
+# каждом. Смешивание bus=ide (куда --cdrom сажает медиа по умолчанию) и
+# bus=sata привело к тому, что общий <os><boot dev='cdrom'/> указывал не на
+# тот привод и SeaBIOS не мог прочитать загрузочный CD.
 sudo virt-install \
   --name "$VM_NAME" \
   --memory 8192 --vcpus 4 \
   --cpu host-passthrough \
   --machine pc \
-  --disk path="$DISK",size=64,format=qcow2,bus=sata \
-  --cdrom "$WIN10_ISO" \
+  --boot cdrom,hd \
+  --disk path="$DISK",size=64,format=qcow2,bus=sata,boot_order=2 \
+  --disk path="$WIN10_ISO",device=cdrom,bus=sata,boot_order=1 \
   --disk path="$VIRTIO_ISO",device=cdrom,bus=sata,readonly=on \
   --disk path="$RESOURCE_ISO",device=cdrom,bus=sata,readonly=on \
   --network network=default,model=e1000e \
   --graphics spice --video qxl --channel spicevmc \
+  --channel unix,target_type=virtio,name=org.qemu.guest_agent.0 \
   --os-variant win10 \
   --noautoconsole
 

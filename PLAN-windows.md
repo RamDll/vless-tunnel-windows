@@ -381,11 +381,11 @@ virsh -c qemu:///system list              # должно работать без
 создании.
 
 `autounattend.xml` и скрипт первого входа (`setup-guest.ps1`) должны:
-- создать локальную учётку администратора, автологин не включать;
+- создать локальную учётку администратора; автологин — постоянный (по решению владельца: это стенд для разработки, а не конечный продукт, вводить пароль на консоли каждый раз неудобно). Технически это ещё и единственный работающий способ запустить `setup-guest.ps1` без участия человека в этом образе: `Microsoft-Windows-Deployment`/`RunSynchronousCommand` не поддерживается этой сборкой Windows ни в `specialize`, ни в `oobeSystem` (проверено эмпирически через `setupact.log`), поэтому используется `FirstLogonCommands`, а для него нужен хотя бы один вход;
 - поставить драйверы virtio и **qemu-guest-agent** с ISO virtio-win;
 - включить **OpenSSH Server**, PowerShell как оболочку по умолчанию, вход по ключу (`administrators_authorized_keys` с правильным ACL);
-- отключить сон, гибернацию и автоперезагрузку для обновлений; приостановить Windows Update;
-- исключить `C:\dev` из проверки Defender (только на стенде: Xray и сетевые скрипты дают ложные срабатывания);
+- отключить сон и гибернацию (иначе автоматические тесты будут прерываться простоем) — но **не** Windows Update: владелец настоял, что стенд должен вести себя как обычная машина пользователя, иначе часть реальных проблем (обновление посреди теста, перезагрузка, столкновение с туннелем) просто не всплывёт до релиза;
+- исключить `C:\dev` из проверки Defender (только эта папка со скриптами стенда, не сам vless-tunnel — тот ставится в `%ProgramFiles%\vless-tunnel\` и остаётся под обычной проверкой антивируса, как и должно быть);
 - создать `C:\dev\{logs,secrets,bin}`;
 - в конце выключить машину — это сигнал хосту, что установка завершена.
 
@@ -532,10 +532,25 @@ with-rescue.sh и проверь всю цепочку спасения, нам�
 
 _Заполняет агент после каждого этапа (см. 5.9)._
 
-- Этап 0а (стенд): в процессе.
-  - Хост подготовлен: `qemu-system-x86`/`libvirt-daemon-system`/`virtinst`/`genisoimage`/`ovmf`/`swtpm` установлены, `libvirtd` активен, сеть `default` (NAT `virbr0`) поднята, группы `libvirt`/`kvm` добавлены пользователю (агенту выдан passwordless sudo — см. правку 5.1/5.8, используется для этой настройки).
-  - .NET 10 SDK 10.0.112 установлен через apt (`dotnet-sdk-10.0`).
-  - `~/vm-iso/win10.iso` — симлинк на уже имеющийся ISO (`/mnt/hdd/Windows/Win10_22H2_Russian_x64v1.iso`), локализация русская — учесть в `autounattend.xml`. Win11 не трогаем — по плану (5.2) это отдельная машина на потом.
-  - Не сделано: `vm/*` (create-vm.sh, autounattend.xml, setup-guest.ps1, vmctl.sh, with-rescue.sh), сама виртуалка `vt-win10`, снимок `clean`.
+- Этап 0а (стенд): **готово полностью.**
+  - Хост подготовлен: `qemu-system-x86`/`libvirt-daemon-system`/`virtinst`/`genisoimage`/`ovmf`/`swtpm`/`libguestfs-tools`/`wimtools`/`libosinfo-bin` установлены, `libvirtd` активен, сеть `default` (NAT `virbr0`) поднята, группы `libvirt`/`kvm` у пользователя. .NET 10 SDK 10.0.112 через apt.
+  - `vm/*` написаны и работают: `create-vm.sh`, `autounattend.xml.template`, `setup-guest.ps1`, `rescue.ps1`, `run-test.ps1`, `vmctl.sh`, `with-rescue.sh`.
+  - **Виртуалка `vt-win10` полностью устанавливается с нуля без участия человека**: `autounattend.xml` (Windows 10 Pro, ru-RU, диск SATA/BIOS/MBR, автологин vtadmin), `setup-guest.ps1` через `FirstLogonCommands` ставит guest agent, виртио-драйверы, OpenSSH (вход по ключу), выключает сон/гибернацию, Defender-исключение для `C:\dev`, копирует `rescue.ps1`/`run-test.ps1` — и сама выключается в конце (сигнал хосту). SSH и guest agent подтверждены (`vmctl.sh status` → `ssh: ok`). Снимок `clean` снят.
+  - Windows Update **сознательно не трогаем** (решение владельца, см. 5.2) — стенд ведёт себя как обычная машина пользователя.
+  - **Цепочка спасения проверена вживую, оба сценария:**
+    - обрыв сети (`Disable-NetAdapter` через guest-exec) → `vmctl.sh rescue` (тот же `rescue.ps1` через guest agent) → SSH снова доступен;
+    - обрыв сети **и** убитый `QEMU-GA` одновременно (полный отказ) → `virsh snapshot-revert clean --running` → guest agent и SSH снова живы.
+    - Дополнительно обнаружено: `run-test.ps1`'s `finally` сам вызывает `rescue.ps1` **локально**, независимо от хоста — это дополнительный (более быстрый) уровень защиты поверх host-side пути через `with-rescue.sh`, оба работают.
+  - `vmctl.sh` доработан: `-o ServerAliveInterval=5 -o ServerAliveCountMax=2` для ssh/scp — без этого при реальном обрыве сети (не просто недоступности порта, а падения соединения на живом TCP) ssh мог зависать на много минут вместо быстрого обнаружения обрыва.
+  - **Известные грабли, на будущее:**
+    - `Microsoft-Windows-Deployment`/`RunSynchronousCommand` не работает в этой сборке Windows ни в `specialize` (жёсткая ошибка парсинга файла ответов), ни в `oobeSystem` (тихо регистрируется и игнорируется) — рабочий путь: `FirstLogonCommands` + постоянный `AutoLogon`.
+    - `$OEM$\$1\...` не копируется Setup'ом, если ответный файл лежит на ОТДЕЛЬНОМ CD-ROM, а не на самом install-ISO (нужен WDS/MDT-подобный сценарий) — файлы для `FirstLogonCommands` кладутся в корень ресурсного ISO, буква диска ищется перебором (`for %d in (C..J)`) прямо в команде.
+    - Спецсимволы `%date%`/`%time%`, `&`, скобки, `>>` в `<Path>`/`<CommandLine>` ломают разбор файла ответов — держать команду максимально простой.
+    - `.ps1`-файлы **обязательно** с UTF-8 BOM (уже знали из раздела 3.9, но один раз забыли применить к своим же файлам) — без BOM Windows PowerShell 5.1 не парсит кириллицу и падает на `ParserError`.
+    - QEMU-канал guest agent (`--channel unix,target_type=virtio,name=org.qemu.guest_agent.0`) нужно добавлять в `virt-install` явно, сам не появляется.
+    - Все диски/CD-ROM у одной VM должны быть на одной шине (`bus=sata`) с явным `boot_order` — смешение с `bus=ide` (куда `--cdrom` сажает медиа по умолчанию) путает SeaBIOS.
+    - `libvirt-qemu` не имеет доступа к файлам в домашней папке — в `/etc/libvirt/qemu.conf` выставлено `user = "ramdll"`.
+    - `vmctl.sh` требует `-o IdentitiesOnly=yes` для ssh/scp — иначе ssh-agent хоста подставляет чужие ключи раньше нашего и упирается в лимит попыток сервера.
+    - Диагностика живой VM без SSH/agent — через `virsh screenshot` + `virsh send-key` + QMP `input-send-event` (абсолютная мышь, есть usb-tablet) для скриншотов/кликов/набора текста вслепую; офлайн-чтение диска через `virt-ls`/`virt-cat` (`libguestfs-tools`) — надёжнее живой сессии, не зависит от прав/блокировок.
 - Этап 0б (спайк): не начат
-- Туннель на хосте и трафик виртуалки: проверено — `vless-tunnel.service` сейчас неактивен (inactive/dead), петли в `virbr0` нет.
+- Туннель на хосте и трафик виртуалки: проверено — `vless-tunnel.service` неактивен, петли в `virbr0` нет.

@@ -41,8 +41,8 @@ ip_of() {
 do_ssh() {
   local ip
   ip="$(ip_of)"
-  ssh -i "$SSH_KEY" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
-      -o ConnectTimeout=10 "$SSH_USER@$ip" "$@"
+  ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
+      -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "$SSH_USER@$ip" "$@"
 }
 
 do_scp() {
@@ -50,8 +50,8 @@ do_scp() {
   ip="$(ip_of)"
   src="${src/vt-win10:/$SSH_USER@$ip:}"
   dst="${dst/vt-win10:/$SSH_USER@$ip:}"
-  scp -i "$SSH_KEY" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
-      -o ConnectTimeout=10 "$src" "$dst"
+  scp -i "$SSH_KEY" -o IdentitiesOnly=yes -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
+      -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "$src" "$dst"
 }
 
 # guest-exec через QEMU guest agent — работает без сети внутри виртуалки,
@@ -86,7 +86,7 @@ do_status() {
   local ip
   if ip="$(ip_of 2>/dev/null)"; then
     echo "ip: $ip"
-    if ssh -i "$SSH_KEY" -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
+    if ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
         -o ConnectTimeout=5 -o BatchMode=yes "$SSH_USER@$ip" "echo ok" >/dev/null 2>&1; then
       echo "ssh: ok"
     else
