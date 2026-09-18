@@ -4,14 +4,13 @@ using VlessTunnel.Core.Ipc;
 
 // vless-tunnel.exe — клиент IPC (план, 3.5). Команды, для которых уже
 // есть серверная реализация (VlessTunnel.Service.exe serve, этап 4):
-// on | off | toggle | restart | status [--json] | set-link [--stdin] | doctor.
+// on | off | toggle | restart | status [--json] | set-link [--stdin] |
+// doctor | test | captive-portal | update-core | self-update.
 //
-// Ещё не реализовано на сервере (это отдельные, более поздние этапы —
-// test/logs требуют собственно логов с ротацией и живых проверок
-// HTTP/SOCKS5/UDP/DNS, autostart — планировщик задач, update-core —
-// скачивание релиза с сверкой .dgst, ensure/uninstall — часть
-// установщика): команда распознаётся, но явно сообщает, что не готова,
-// вместо того чтобы притворяться рабочей.
+// Ещё не реализовано на сервере (это отдельные этапы — logs выводит уже
+// существующие файлы ротации, autostart — планировщик задач, ensure/
+// uninstall — часть установщика): команда распознаётся, но явно
+// сообщает, что не готова, вместо того чтобы притворяться рабочей.
 
 if (args.Length < 1)
 {
