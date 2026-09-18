@@ -1,8 +1,11 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/VlessTunnel.Core/VlessTunnel.Core.csproj" />
+    <Project Path="src/VlessTunnel.Native/VlessTunnel.Native.csproj" />
+    <Project Path="src/VlessTunnel.Service/VlessTunnel.Service.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/VlessTunnel.Core.Tests/VlessTunnel.Core.Tests.csproj" />
+    <Project Path="tests/VlessTunnel.Native.Tests/VlessTunnel.Native.Tests.csproj" />
   </Folder>
 </Solution>

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VlessTunnel.Native</RootNamespace>
+    <!-- P/Invoke к iphlpapi/fwpuclnt (план, 2) — кроссплатформенной обёртки для
+         записи в таблицу маршрутов/WFP в .NET нет, поэтому сборка таргетит
+         Windows и собирается на Linux-хосте кросс-компиляцией (запускается
+         только на стенде). -->
+  </PropertyGroup>
+
+</Project>
