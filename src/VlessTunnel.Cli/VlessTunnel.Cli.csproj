@@ -10,6 +10,8 @@
     <!-- План, 3.5: vless-tunnel.exe — клиент IPC, только с сервером
          разговаривает через именованный канал, сам ничего Windows-
          специфичного не делает (кроме собственно пути канала). -->
+    <!-- См. комментарий в VlessTunnel.Service.csproj — та же причина. -->
+    <SatelliteResourceLanguages>ru</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>

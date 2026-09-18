@@ -17,6 +17,10 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <!-- WinForms, не WPF — план, 3.6, только значок + простое меню + одно
          окно, NotifyIcon для этого хватает без лишней инфраструктуры. -->
+    <!-- См. комментарий в VlessTunnel.Service.csproj — та же причина
+         (у Tray особенно заметно: System.Windows.Forms.resources.dll
+         на каждый из 12 лишних языков). -->
+    <SatelliteResourceLanguages>ru</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>

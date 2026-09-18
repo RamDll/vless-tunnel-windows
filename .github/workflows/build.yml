@@ -105,7 +105,15 @@ jobs:
             exit 1
           }
           Expand-Archive xray.zip -DestinationPath xray-extracted
-          Copy-Item xray-extracted\xray.exe, xray-extracted\wintun.dll, xray-extracted\geoip.dat, xray-extracted\geosite.dat dist\
+          # geoip.dat/geosite.dat (базы Xray для маршрутизации по
+          # стране/домену — geosite:.../geoip:...) сознательно не
+          # копируются: наша маршрутизация идёт целиком через Windows
+          # (host-route до сервера + /1-маршруты через TUN) и WFP
+          # kill-switch, не через встроенные правила Xray — ни один
+          # сгенерированный конфиг (ConfigBuilder) на geoip/geosite не
+          # ссылается, как и Linux-версия. ~30 МБ чистого балласта в
+          # установщике без единого функционального применения.
+          Copy-Item xray-extracted\xray.exe, xray-extracted\wintun.dll dist\
 
       - name: Copy tray icons
         run: Copy-Item packaging\icons\*.ico dist\
