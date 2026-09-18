@@ -2,6 +2,7 @@ using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.Json;
+using System.Threading.Channels;
 using VlessTunnel.Core.Ipc;
 
 namespace VlessTunnel.Service;
@@ -21,9 +22,22 @@ public sealed class IpcServer
     private readonly Action<string> _log;
     private readonly string? _allowedUser;
 
+    // Ревью п.8: раньше Broadcast писал подписчикам синхронно
+    // (StreamWriter.WriteLine) прямо из SetState, который вызывается
+    // ИЗНУТРИ OnAsync/OffAsync под единственным на всю службу _gate
+    // (TunnelController) — если подписчик (например, зависший трей) не
+    // читает свой конец канала, ОС-буфер именованного канала заполняется,
+    // WriteLine блокируется НАВСЕГДА, _gate никогда не освобождается — то
+    // есть один зависший клиент вешал вообще ВСЮ службу для всех.
+    // Теперь у каждого подписчика своя ограниченная очередь (Channel) и
+    // отдельная задача-обработчик — Broadcast только кладёт в очередь
+    // (TryWrite, никогда не блокируется) и отключает подписчика, если тот
+    // не успевает вычитывать (очередь переполнена).
+    private sealed record Subscriber(StreamWriter Writer, Channel<string> Queue, NamedPipeServerStream Pipe);
+
     // Активные подписчики на события (план, 3.4: "трей не опрашивает
     // службу по таймеру") — рассылка при каждой смене состояния.
-    private readonly List<StreamWriter> _subscribers = [];
+    private readonly List<Subscriber> _subscribers = [];
     private readonly Lock _subscribersLock = new();
 
     public IpcServer(TunnelController controller, Action<string> log, string? allowedUser = null)
@@ -70,7 +84,7 @@ public sealed class IpcServer
 
     private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken ct)
     {
-        StreamWriter? subscriberWriter = null;
+        Subscriber? subscriber = null;
         try
         {
             using var reader = new StreamReader(pipe);
@@ -86,8 +100,14 @@ public sealed class IpcServer
 
                 if (req.Cmd == IpcCommands.Subscribe)
                 {
-                    subscriberWriter = writer;
-                    lock (_subscribersLock) { _subscribers.Add(writer); }
+                    // Capacity=8 — с большим запасом на реальный темп смены
+                    // состояний (доли герц), не на пропускную способность;
+                    // переполнение означает "подписчик не читает вообще",
+                    // не "события идут слишком часто".
+                    var queue = Channel.CreateBounded<string>(8);
+                    subscriber = new Subscriber(writer, queue, pipe);
+                    lock (_subscribersLock) { _subscribers.Add(subscriber); }
+                    _ = DrainSubscriberAsync(subscriber, ct);
                     await WriteAsync(writer, new IpcResponse { Ok = true, Status = _controller.GetStatus() });
                     continue; // клиент остаётся на связи и получает события, но может слать и новые команды
                 }
@@ -102,10 +122,30 @@ public sealed class IpcServer
         }
         finally
         {
-            if (subscriberWriter is not null)
-                lock (_subscribersLock) { _subscribers.Remove(subscriberWriter); }
+            if (subscriber is not null)
+            {
+                lock (_subscribersLock) { _subscribers.Remove(subscriber); }
+                subscriber.Queue.Writer.TryComplete();
+            }
             pipe.Dispose();
         }
+    }
+
+    // Один на подписчика — вычитывает очередь и пишет в pipe. Живёт,
+    // пока очередь не завершится (клиент отключился, см. finally выше)
+    // или пока сама запись не упадёт (пайп разорван клиентом раньше,
+    // чем HandleClientAsync это заметил); в обоих случаях просто
+    // завершается — Broadcast больше не найдёт этого подписчика в
+    // списке при следующей рассылке (или найдёт, но TryWrite в уже
+    // Complete-нутый Channel безопасно вернёт false).
+    private static async Task DrainSubscriberAsync(Subscriber sub, CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var ev in sub.Queue.Reader.ReadAllAsync(ct))
+                await sub.Writer.WriteLineAsync(ev);
+        }
+        catch { /* пайп разорван или отменено — HandleClientAsync сам подчистит подписку */ }
     }
 
     private async Task<IpcResponse> DispatchAsync(IpcRequest req, CancellationToken ct)
@@ -175,12 +215,19 @@ public sealed class IpcServer
     private void Broadcast(TunnelStatus status)
     {
         var ev = JsonSerializer.Serialize(new IpcEvent { Event = "state-changed", Status = status });
-        List<StreamWriter> targets;
+        List<Subscriber> targets;
         lock (_subscribersLock) { targets = [.. _subscribers]; }
-        foreach (var w in targets)
+        foreach (var sub in targets)
         {
-            try { w.WriteLine(ev); }
-            catch { /* отключившийся подписчик уберётся при следующем HandleClientAsync.finally */ }
+            // TryWrite никогда не блокируется — это и есть весь смысл
+            // фикса (ревью п.8): вызывающий SetState держит единственный
+            // на всю службу _gate, зависание здесь означало зависание
+            // всей службы для всех клиентов.
+            if (!sub.Queue.Writer.TryWrite(ev))
+            {
+                _log("IPC: подписчик не успевал вычитывать события — отключаю");
+                try { sub.Pipe.Dispose(); } catch { /* могла закрыться сама */ }
+            }
         }
     }
 
