@@ -66,6 +66,48 @@ internal static class FwpDataType
     public const uint RangeType = 0x102;
 }
 
+/// <summary>
+/// FWP_V4_ADDR_AND_MASK — по документации Microsoft адрес и маска здесь
+/// в HOST order (не network order, как в SOCKADDR_INET/IN_ADDR выше) —
+/// на x64 это little-endian. <see cref="FromCidr"/> строит числовое
+/// значение явным побитовым сдвигом байт октетов (10.0.0.0 → 0x0A000000),
+/// что endian-независимо само по себе, а .NET сохранит его в памяти как
+/// раз в machine/host order — то есть ровно то, что требует API.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct FWP_V4_ADDR_AND_MASK
+{
+    public uint addr;
+    public uint mask;
+
+    public static FWP_V4_ADDR_AND_MASK FromCidr(System.Net.IPAddress network, byte prefixLength)
+    {
+        var b = network.GetAddressBytes();
+        var addr = ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
+        var mask = prefixLength == 0 ? 0u : 0xFFFFFFFFu << (32 - prefixLength);
+        return new FWP_V4_ADDR_AND_MASK { addr = addr, mask = mask };
+    }
+}
+
+/// <summary>FWP_V6_ADDR_AND_MASK — addr в обычном сетевом порядке байт (не host order, в отличие от v4-варианта), prefixLength — число бит маски.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct FWP_V6_ADDR_AND_MASK
+{
+    public byte a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15;
+    public byte prefixLength;
+
+    public static FWP_V6_ADDR_AND_MASK FromCidr(System.Net.IPAddress network, byte prefixLength)
+    {
+        var b = network.GetAddressBytes();
+        return new FWP_V6_ADDR_AND_MASK
+        {
+            a0 = b[0], a1 = b[1], a2 = b[2], a3 = b[3], a4 = b[4], a5 = b[5], a6 = b[6], a7 = b[7],
+            a8 = b[8], a9 = b[9], a10 = b[10], a11 = b[11], a12 = b[12], a13 = b[13], a14 = b[14], a15 = b[15],
+            prefixLength = prefixLength,
+        };
+    }
+}
+
 /// <summary>FWP_MATCH_TYPE.</summary>
 internal static class FwpMatchType
 {

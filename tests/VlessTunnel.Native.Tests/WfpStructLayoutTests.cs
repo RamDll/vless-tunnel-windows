@@ -19,6 +19,39 @@ public sealed class WfpStructLayoutTests
     public void Byte_blob_is_16_bytes() => Assert.Equal(16, Marshal.SizeOf<FWP_BYTE_BLOB>());
 
     [Fact]
+    public void V4_addr_and_mask_is_8_bytes() => Assert.Equal(8, Marshal.SizeOf<FWP_V4_ADDR_AND_MASK>());
+
+    [Fact]
+    public void V4_addr_and_mask_from_cidr_is_host_order()
+    {
+        // 10.0.0.0/8 -> addr=0x0A000000, mask=0xFF000000 (host order — на x64
+        // это значит младший байт в памяти = 0x00, старший = 0x0A/0xFF).
+        var v = FWP_V4_ADDR_AND_MASK.FromCidr(System.Net.IPAddress.Parse("10.0.0.0"), 8);
+        Assert.Equal(0x0A000000u, v.addr);
+        Assert.Equal(0xFF000000u, v.mask);
+    }
+
+    [Fact]
+    public void V4_addr_and_mask_slash_24()
+    {
+        var v = FWP_V4_ADDR_AND_MASK.FromCidr(System.Net.IPAddress.Parse("192.168.1.0"), 24);
+        Assert.Equal(0xC0A80100u, v.addr);
+        Assert.Equal(0xFFFFFF00u, v.mask);
+    }
+
+    [Fact]
+    public void V6_addr_and_mask_is_17_bytes() => Assert.Equal(17, Marshal.SizeOf<FWP_V6_ADDR_AND_MASK>());
+
+    [Fact]
+    public void V6_addr_and_mask_from_cidr()
+    {
+        var v = FWP_V6_ADDR_AND_MASK.FromCidr(System.Net.IPAddress.Parse("fc00::"), 7);
+        Assert.Equal(0xFC, v.a0);
+        Assert.Equal(0, v.a1);
+        Assert.Equal(7, v.prefixLength);
+    }
+
+    [Fact]
     public void Condition_value_is_16_bytes_type_then_value() => Assert.Equal(16, Marshal.SizeOf<FWP_CONDITION_VALUE0>());
 
     [Fact]

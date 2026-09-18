@@ -1,22 +1,27 @@
 using System.ComponentModel;
+using System.Net;
 using System.Runtime.InteropServices;
 using VlessTunnel.Native.Interop;
 
 namespace VlessTunnel.Native;
 
 /// <summary>
-/// WFP kill-switch (план, 3.3) — MVP-объём: разрешить xray.exe, loopback и
-/// сам TUN-интерфейс на слое ALE_AUTH_CONNECT (V4/V6), запретить всё
-/// остальное исходящее. Постоянные (persistent) provider/sublayer/filter —
-/// переживают падение процесса и перезапуск BFE, снимаются только явным
-/// <see cref="Uninstall"/>.
+/// WFP kill-switch (план, 3.3): на слое ALE_AUTH_CONNECT (V4/V6) — разрешить
+/// xray.exe, loopback, сам TUN-интерфейс, приватные сети (если не
+/// <c>excludeLan:false</c>) и DHCP; запретить порт 53 (DNS) мимо TUN;
+/// запретить всё остальное исходящее. Постоянные (persistent)
+/// provider/sublayer/filter — переживают падение процесса и перезапуск
+/// BFE, снимаются только явным <see cref="Uninstall"/>.
 ///
-/// Сознательно НЕ входит в этот первый проход (план 3.3 упоминает, но это
-/// отдельная работа поверх уже проверенного механизма): разрешение
-/// приватных сетей при не-<c>--proxy-lan</c>, разрешение DHCP, запрет
-/// DNS (порт 53) мимо TUN. Добавляются тем же способом — ещё парой
-/// фильтров в <see cref="AddLayerFilters"/> — после того как этот базовый
-/// набор проверен живым тестом на стенде.
+/// Порядок весов внутри sublayer (выигрывает подошедший фильтр с бОльшим
+/// весом, не "кто раньше создан"): 10 — xray.exe/loopback/TUN-интерфейс;
+/// 8 — запрет DNS мимо TUN (обязан перебивать разрешение приватных сетей
+/// ниже, иначе DNS-сервер в LAN стал бы дырой); 5 — приватные сети/DHCP;
+/// 0 — catch-all запрет.
+///
+/// Ещё не сделано (план 3.3 упоминает, но не в этом проходе): команда
+/// <c>doctor</c> (аварийный поиск/снятие зависших фильтров — черновик
+/// уже есть в vm/rescue.ps1, но не как часть публичного API этого класса).
 /// </summary>
 public static class KillSwitch
 {
@@ -36,11 +41,45 @@ public static class KillSwitch
     private static readonly Guid FilterLoopbackV6 = new("13e6ab96-6d64-4911-8fa5-caf72c7e41e9");
     private static readonly Guid FilterInterfaceV6 = new("c0805eb2-c2eb-4d49-a83c-d153e31082ed");
     private static readonly Guid FilterBlockV6 = new("84b7f87a-4244-406d-a443-aa3daaca793a");
+    private static readonly Guid FilterDnsBlockV4 = new("f21b6b1a-2e5b-4a3c-9c2a-6a8f1e6a9b01");
+    private static readonly Guid FilterDnsBlockV6 = new("f21b6b1a-2e5b-4a3c-9c2a-6a8f1e6a9b02");
+    private static readonly Guid FilterDhcpV4 = new("f21b6b1a-2e5b-4a3c-9c2a-6a8f1e6a9b03");
+    private static readonly Guid FilterDhcpV6 = new("f21b6b1a-2e5b-4a3c-9c2a-6a8f1e6a9b04");
+
+    // Тот же список приватных сетей, что в Core/ConfigBuilder.cs (общий
+    // источник истины с Linux-эталоном) — здесь отдельная копия, потому
+    // что VlessTunnel.Native сознательно не зависит от Core.
+    private static readonly (string Network, byte Prefix)[] Private4 =
+    [
+        ("0.0.0.0", 8), ("10.0.0.0", 8), ("100.64.0.0", 10), ("127.0.0.0", 8), ("169.254.0.0", 16),
+        ("172.16.0.0", 12), ("192.0.0.0", 24), ("192.0.2.0", 24), ("192.168.0.0", 16), ("198.18.0.0", 15),
+        ("198.51.100.0", 24), ("203.0.113.0", 24), ("224.0.0.0", 4), ("240.0.0.0", 4),
+    ];
+
+    private static readonly (string Network, byte Prefix)[] Private6 =
+        [("::1", 128), ("fc00::", 7), ("fe80::", 10), ("ff00::", 8)];
+
+    // Ключи для приватных сетей выводятся из базового GUID подстановкой
+    // последнего байта индексом — не нужно хранить/вручную придумывать
+    // 18 отдельных констант, а Uninstall() всё равно может их
+    // детерминированно восстановить по тем же спискам Private4/Private6.
+    private static readonly Guid PrivateNetV4Base = new("f21b6b1a-2e5b-4a3c-9c2a-6a8f1e6a9c00");
+    private static readonly Guid PrivateNetV6Base = new("f21b6b1a-2e5b-4a3c-9c2a-6a8f1e6a9d00");
+
+    private static Guid DerivedGuid(Guid baseGuid, int index)
+    {
+        var bytes = baseGuid.ToByteArray();
+        bytes[15] = checked((byte)index);
+        return new Guid(bytes);
+    }
 
     private const uint FwpErrorAlreadyExists = 0x80320009;
     private const uint FwpErrorNotFound = 0x80320012;
+    private const ushort DhcpServerPortV4 = 67;
+    private const ushort DhcpServerPortV6 = 547;
+    private const ushort DnsPort = 53;
 
-    public static void Install(string xrayExePath, int tunInterfaceIndex, Action<string>? trace = null)
+    public static void Install(string xrayExePath, int tunInterfaceIndex, bool excludeLan = true, Action<string>? trace = null)
     {
         void Trace(string s) { trace?.Invoke(s); }
 
@@ -67,10 +106,20 @@ public static class KillSwitch
                 {
                     var tunLuid = RouteManager.GetInterfaceLuid(tunInterfaceIndex);
                     Trace($"tunLuid={tunLuid}");
-                    AddLayerFilters(engine, WfpWellKnown.LayerAleAuthConnectV4, appIdBlob, tunLuid,
+
+                    using var tunLuidBuf = new NativeUInt64(tunLuid);
+
+                    AddCommonFilters(engine, WfpWellKnown.LayerAleAuthConnectV4, appIdBlob, tunLuidBuf.Pointer,
                         FilterAppV4, FilterLoopbackV4, FilterInterfaceV4, FilterBlockV4, Trace);
-                    AddLayerFilters(engine, WfpWellKnown.LayerAleAuthConnectV6, appIdBlob, tunLuid,
+                    AddDnsBlock(engine, WfpWellKnown.LayerAleAuthConnectV4, FilterDnsBlockV4, Trace);
+                    AddDhcpPermit(engine, WfpWellKnown.LayerAleAuthConnectV4, FilterDhcpV4, DhcpServerPortV4, Trace);
+                    if (excludeLan) AddPrivateNetPermits(engine, WfpWellKnown.LayerAleAuthConnectV4, isV6: false, Trace);
+
+                    AddCommonFilters(engine, WfpWellKnown.LayerAleAuthConnectV6, appIdBlob, tunLuidBuf.Pointer,
                         FilterAppV6, FilterLoopbackV6, FilterInterfaceV6, FilterBlockV6, Trace);
+                    AddDnsBlock(engine, WfpWellKnown.LayerAleAuthConnectV6, FilterDnsBlockV6, Trace);
+                    AddDhcpPermit(engine, WfpWellKnown.LayerAleAuthConnectV6, FilterDhcpV6, DhcpServerPortV6, Trace);
+                    if (excludeLan) AddPrivateNetPermits(engine, WfpWellKnown.LayerAleAuthConnectV6, isV6: true, Trace);
                 }
                 finally
                 {
@@ -107,7 +156,16 @@ public static class KillSwitch
         if (err != WfpEngine.NO_ERROR) throw new Win32Exception((int)err, "FwpmEngineOpen0 failed");
         try
         {
-            foreach (var key in new[] { FilterAppV4, FilterLoopbackV4, FilterInterfaceV4, FilterBlockV4, FilterAppV6, FilterLoopbackV6, FilterInterfaceV6, FilterBlockV6 })
+            var keys = new List<Guid>
+            {
+                FilterAppV4, FilterLoopbackV4, FilterInterfaceV4, FilterBlockV4,
+                FilterAppV6, FilterLoopbackV6, FilterInterfaceV6, FilterBlockV6,
+                FilterDnsBlockV4, FilterDnsBlockV6, FilterDhcpV4, FilterDhcpV6,
+            };
+            for (var i = 0; i < Private4.Length; i++) keys.Add(DerivedGuid(PrivateNetV4Base, i));
+            for (var i = 0; i < Private6.Length; i++) keys.Add(DerivedGuid(PrivateNetV6Base, i));
+
+            foreach (var key in keys)
             {
                 var k = key;
                 var e = WfpEngine.FwpmFilterDeleteByKey0(engine, ref k);
@@ -178,7 +236,17 @@ public static class KillSwitch
         public void Dispose() => Marshal.FreeHGlobal(Pointer);
     }
 
-    /// <summary>Неуправляемая память под один UINT64 — см. комментарий у AddLayerFilters.</summary>
+    /// <summary>
+    /// Неуправляемая память под один UINT64 — FWP_CONDITION_VALUE0.uint64
+    /// это "UINT64 *uint64" (документация Microsoft: "This value cannot be
+    /// null"), а не встроенное значение, как uint8/uint16/uint32 в том же
+    /// union'е. Класть туда сам LUID напрямую — access violation внутри
+    /// FwpmFilterAdd0 (WFP пытается разыменовать LUID как адрес памяти):
+    /// поймано живым тестом на стенде (crash c0000005 в KERNELBASE.dll),
+    /// не по документации — единственное место в WFP-структурах, где
+    /// Marshal.SizeOf не помог бы, потому что дело не в layout, а в
+    /// семантике поля.
+    /// </summary>
     private readonly struct NativeUInt64 : IDisposable
     {
         public nint Pointer { get; }
@@ -190,15 +258,8 @@ public static class KillSwitch
         public void Dispose() => Marshal.FreeHGlobal(Pointer);
     }
 
-    /// <summary>
-    /// Четыре фильтра на слое (план, 3.3): разрешить xray.exe, разрешить
-    /// loopback, разрешить сам TUN-интерфейс, запретить всё остальное.
-    /// Permit-фильтры получают более высокий вес (10), чем catch-all block
-    /// (0) — внутри одного sublayer выигрывает фильтр с бОльшим весом
-    /// среди подошедших, поэтому явный порядок весов обязателен, а не
-    /// "кто раньше создан".
-    /// </summary>
-    private static void AddLayerFilters(nint engine, Guid layer, nint appIdBlob, ulong tunLuid, Guid appKey, Guid loopbackKey, Guid interfaceKey, Guid blockKey, Action<string> trace)
+    /// <summary>Разрешить xray.exe, loopback, сам TUN-интерфейс; запретить всё остальное (вес 10/10/10/0).</summary>
+    private static void AddCommonFilters(nint engine, Guid layer, nint appIdBlob, nint tunLuidPtr, Guid appKey, Guid loopbackKey, Guid interfaceKey, Guid blockKey, Action<string> trace)
     {
         AddFilter(engine, appKey, layer, "vless-tunnel: permit xray.exe", FwpActionType.Permit, weight: 10,
             [Condition(WfpWellKnown.ConditionAleAppId, FwpMatchType.Equal, FWP_CONDITION_VALUE0.AsPointer(FwpDataType.ByteBlobType, appIdBlob))], trace);
@@ -206,19 +267,65 @@ public static class KillSwitch
         AddFilter(engine, loopbackKey, layer, "vless-tunnel: permit loopback", FwpActionType.Permit, weight: 10,
             [Condition(WfpWellKnown.ConditionFlags, FwpMatchType.FlagsAllSet, FWP_CONDITION_VALUE0.UInt32(WfpWellKnown.ConditionFlagIsLoopback))], trace);
 
-        // FWP_CONDITION_VALUE0.uint64 — это "UINT64 *uint64" (документация:
-        // "This value cannot be null"), а не встроенное значение — в отличие
-        // от uint8/uint16/uint32, которые лежат в union'е инлайн. Класть туда
-        // сам LUID напрямую — access violation внутри FwpmFilterAdd0 (WFP
-        // пытается разыменовать LUID как адрес памяти): поймано живым тестом
-        // на стенде (crash c0000005 в KERNELBASE.dll), не по документации —
-        // это единственное место в WFP-структурах, где Marshal.SizeOf не
-        // помог бы, потому что дело не в layout, а в семантике поля.
-        using var tunLuidBuf = new NativeUInt64(tunLuid);
         AddFilter(engine, interfaceKey, layer, "vless-tunnel: permit TUN interface", FwpActionType.Permit, weight: 10,
-            [Condition(WfpWellKnown.ConditionIpLocalInterface, FwpMatchType.Equal, FWP_CONDITION_VALUE0.AsPointer(FwpDataType.UInt64, tunLuidBuf.Pointer))], trace);
+            [Condition(WfpWellKnown.ConditionIpLocalInterface, FwpMatchType.Equal, FWP_CONDITION_VALUE0.AsPointer(FwpDataType.UInt64, tunLuidPtr))], trace);
 
         AddFilter(engine, blockKey, layer, "vless-tunnel: block everything else", FwpActionType.Block, weight: 0, conditions: [], trace);
+    }
+
+    /// <summary>
+    /// Запрет порта 53 (план, 3.3: "Windows параллельно шлёт DNS во все
+    /// интерфейсы") — вес 8, обязан перебивать permit приватных сетей
+    /// (вес 5) ниже, иначе DNS-сервер в LAN стал бы утечкой; проигрывает
+    /// permit'ам xray.exe/TUN-интерфейса (вес 10), так что DNS через
+    /// туннель по-прежнему разрешён.
+    /// </summary>
+    private static void AddDnsBlock(nint engine, Guid layer, Guid key, Action<string> trace) =>
+        AddFilter(engine, key, layer, "vless-tunnel: block DNS outside TUN", FwpActionType.Block, weight: 8,
+            [Condition(WfpWellKnown.ConditionIpRemotePort, FwpMatchType.Equal, FWP_CONDITION_VALUE0.UInt16(DnsPort))], trace);
+
+    private static void AddDhcpPermit(nint engine, Guid layer, Guid key, ushort port, Action<string> trace) =>
+        AddFilter(engine, key, layer, "vless-tunnel: permit DHCP", FwpActionType.Permit, weight: 5,
+            [Condition(WfpWellKnown.ConditionIpRemotePort, FwpMatchType.Equal, FWP_CONDITION_VALUE0.UInt16(port))], trace);
+
+    /// <summary>
+    /// Приватные сети остаются на физическом интерфейсе при не-<c>--proxy-lan</c>
+    /// (тот же список, что в Core/ConfigBuilder.cs) — иначе такой трафик
+    /// упёрся бы в catch-all block вместе со всем остальным.
+    /// </summary>
+    private static void AddPrivateNetPermits(nint engine, Guid layer, bool isV6, Action<string> trace)
+    {
+        var list = isV6 ? Private6 : Private4;
+        var baseGuid = isV6 ? PrivateNetV6Base : PrivateNetV4Base;
+        for (var i = 0; i < list.Length; i++)
+        {
+            var (network, prefix) = list[i];
+            var address = IPAddress.Parse(network);
+            if (isV6)
+            {
+                var v6 = FWP_V6_ADDR_AND_MASK.FromCidr(address, prefix);
+                var ptr = Marshal.AllocHGlobal(Marshal.SizeOf<FWP_V6_ADDR_AND_MASK>());
+                try
+                {
+                    Marshal.StructureToPtr(v6, ptr, false);
+                    AddFilter(engine, DerivedGuid(baseGuid, i), layer, $"vless-tunnel: permit private net {network}/{prefix}", FwpActionType.Permit, weight: 5,
+                        [Condition(WfpWellKnown.ConditionIpRemoteAddress, FwpMatchType.Equal, FWP_CONDITION_VALUE0.AsPointer(FwpDataType.V6AddrMask, ptr))], trace);
+                }
+                finally { Marshal.FreeHGlobal(ptr); }
+            }
+            else
+            {
+                var v4 = FWP_V4_ADDR_AND_MASK.FromCidr(address, prefix);
+                var ptr = Marshal.AllocHGlobal(Marshal.SizeOf<FWP_V4_ADDR_AND_MASK>());
+                try
+                {
+                    Marshal.StructureToPtr(v4, ptr, false);
+                    AddFilter(engine, DerivedGuid(baseGuid, i), layer, $"vless-tunnel: permit private net {network}/{prefix}", FwpActionType.Permit, weight: 5,
+                        [Condition(WfpWellKnown.ConditionIpRemoteAddress, FwpMatchType.Equal, FWP_CONDITION_VALUE0.AsPointer(FwpDataType.V4AddrMask, ptr))], trace);
+                }
+                finally { Marshal.FreeHGlobal(ptr); }
+            }
+        }
     }
 
     private static FWPM_FILTER_CONDITION0 Condition(Guid fieldKey, uint matchType, FWP_CONDITION_VALUE0 value) =>

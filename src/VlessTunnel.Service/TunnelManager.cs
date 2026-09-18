@@ -156,7 +156,7 @@ public sealed class TunnelManager : IAsyncDisposable
         // утечка мимо TUN" при падении xray.exe невозможна.
         if (_killSwitch)
         {
-            KillSwitch.Install(_xrayExePath, _tunIfIndex, s => _log($"killswitch: {s}"));
+            KillSwitch.Install(_xrayExePath, _tunIfIndex, winOptions.ExcludeLan, s => _log($"killswitch: {s}"));
             _teardown.Add(() => TrySafe(KillSwitch.Uninstall, "снятие kill-switch"));
             _log("Kill-switch включён (WFP)");
         }
