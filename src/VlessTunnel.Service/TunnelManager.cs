@@ -180,7 +180,7 @@ public sealed class TunnelManager : IAsyncDisposable
     /// </summary>
     private const int AlreadyExists = 5010;
 
-    private void WithRetry(Action action, int attempts = 5, int delayMs = 300)
+    private void WithRetry(Action action, int attempts = 15, int delayMs = 400)
     {
         for (var i = 1; ; i++)
         {
@@ -243,7 +243,26 @@ public sealed class TunnelManager : IAsyncDisposable
         // увидит наш же (возможно, уже неверный) маршрут и вернёт его снова.
         RemoveHostRoute(oldGateway, oldIfIndex);
 
-        (_physicalGateway, _physicalIfIndex) = RouteManager.GetBestGateway(_serverIp);
+        var (newGateway, newIfIndex) = RouteManager.GetBestGateway(_serverIp);
+
+        // Жёсткий инвариант, а не только тайминг: анти-петлевой хост-маршрут
+        // НИКОГДА не должен указывать на сам TUN — живым тестом на стенде
+        // подтверждено, что окно подавления (см. _suppressNetworkChangeUntilUtc)
+        // не ловит всё (например, задержанное событие NLA/Windows от самого
+        // факта появления TUN-адаптера может прийти позже 2-секундного окна).
+        // Без этой проверки такой ложный триггер один раз — и хост-маршрут
+        // навсегда остаётся зациклен через TUN, пока не придёт следующий.
+        if (newIfIndex == _tunIfIndex)
+        {
+            _log($"Пересчёт шлюза вернул сам TUN (ifIndex={newIfIndex}) — игнорирую как ложный, восстанавливаю прежний {oldGateway}(if={oldIfIndex})");
+            _physicalGateway = oldGateway;
+            _physicalIfIndex = oldIfIndex;
+            AddHostRoute();
+            return;
+        }
+
+        _physicalGateway = newGateway;
+        _physicalIfIndex = newIfIndex;
         AddHostRoute();
 
         if (!_physicalGateway.Equals(oldGateway) || _physicalIfIndex != oldIfIndex)
