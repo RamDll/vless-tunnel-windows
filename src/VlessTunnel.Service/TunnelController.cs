@@ -169,7 +169,16 @@ public sealed class TunnelController
     {
         // Разбираем ВНЕ замка _gate — set-link не трогает работающий туннель,
         // это только подготовка к следующему on (план, 3.5: set-link — своя команда, не часть on).
-        _link = LinkParser.Parse(linkText);
+        var parsed = LinkParser.Parse(linkText);
+        // Ревью п.11: LinkParser сам НАРОЧНО принимает quic/http/h2 (parity
+        // с эталонным parse_link() на Linux, план 3.1/5.7 — golden-тесты
+        // требуют именно этого). Отдельная Windows-специфичная проверка
+        // ПОСЛЕ разбора (план, раздел 1: "Не делаем" — в ядре нет TUN-
+        // инбаунда для этих транспортов) — раньше без неё конфиг собирался,
+        // xray.exe падал на разборе, пользователь через 40с получал
+        // TimeoutException про адаптер, ни слова о настоящей причине.
+        WindowsTransportGuard.RequireTunSupported(parsed);
+        _link = parsed;
         _log($"set-link: host={_link.Host}");
 
         try
