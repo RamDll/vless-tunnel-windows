@@ -27,6 +27,15 @@ on:
   pull_request:
     branches: [master]
 
+# По умолчанию GITHUB_TOKEN в этом репозитории — read-only (настройка
+# организации/репозитория, не самого workflow), поэтому шаг Release
+# падал "Resource not accessible by integration" при первом реальном
+# пуше тега — нашлось только живым прогоном (в PR из другого репозитория
+# не проверить: там свой контекст прав). contents: write — минимум,
+# достаточный для создания релиза и загрузки в него файлов.
+permissions:
+  contents: write
+
 env:
   DOTNET_VERSION: "10.0.x"
   # Источник истины — vm/pinned-versions.txt (тот же файл, что и для
