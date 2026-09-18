@@ -108,12 +108,12 @@ Filename: "{app}\{#MyTrayExeName}"; Description: "Запустить vless-tunne
 ; реализована на сервере (этап 4 её честно отклоняет) — строка ниже
 ; безопасный no-op до тех пор, не блокирует остальную деинсталляцию.
 Filename: "{app}\{#MyCliExeName}"; Parameters: "uninstall --keep-config"; Flags: runhidden waituntilterminated; RunOnceId: "CliUninstall"
-; Снять kill-switch-фильтры (план, 3.7: "удаление снимает службу,
-; маршруты и WFP-фильтры") — doctor ищет по provider/sublayer, а не по
-; памяти процесса, поэтому отработает и если служба уже остановлена.
-Filename: "{app}\{#MyServiceExeName}"; Parameters: "doctor"; Flags: runhidden waituntilterminated; RunOnceId: "Doctor"
-Filename: "{sys}\sc.exe"; Parameters: "stop {#MyServiceName}"; Flags: runhidden; RunOnceId: "StopSvc"
-Filename: "{sys}\sc.exe"; Parameters: "delete {#MyServiceName}"; Flags: runhidden; RunOnceId: "DeleteSvc"
+; Остановка службы, doctor и sc delete — ТЕПЕРЬ в Pascal
+; (StopAndCleanupServiceForUninstall, вызывается из usUninstall), не
+; декларативными записями здесь: без этого doctor снимал WFP-фильтры
+; ДО того, как sc stop гарантированно остановил службу (sc stop
+; асинхронен — здесь раньше не ждали, ревью п.6), то есть у ЖИВОЙ
+; службы с потенциально поднятым туннелем, а не у уже мёртвой.
 #if CertThumbprint != ""
 Filename: "{sys}\certutil.exe"; Parameters: "-delstore Root {#CertThumbprint}"; Flags: runhidden; RunOnceId: "DelRoot"
 Filename: "{sys}\certutil.exe"; Parameters: "-delstore TrustedPublisher {#CertThumbprint}"; Flags: runhidden; RunOnceId: "DelTP"
@@ -134,6 +134,84 @@ var
 begin
   Exec(ExpandConstant('{sys}\sc.exe'), 'query ' + ServiceName, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := ResultCode = 0;
+end;
+
+{ Ревью п.6: sc.exe stop возвращается сразу после ОТПРАВКИ запроса на
+  останов — сама служба останавливается асинхронно. ewWaitUntilTerminated
+  ждёт завершения ПРОЦЕССА sc.exe (доли секунды), а не факта остановки
+  СЛУЖБЫ — далее по коду идёт замена занятых файлов, отсюда гонка
+  (вероятный вклад в "тихая установка молча ничего не поменяла", уже
+  вскрытую RestartManager'ом отдельно). Опрашиваем реальное состояние
+  через сам Win32 API (advapi32.dll), не через текст sc query — его
+  вывод локализован по меткам полей (тот же урок, что и в
+  GetExistingAllowUser выше: на русской Windows "STATE" не найти). }
+const
+  SC_MANAGER_CONNECT = $0001;
+  SERVICE_QUERY_STATUS = $0004;
+  SERVICE_STOPPED = 1;
+
+type
+  SERVICE_STATUS = record
+    dwServiceType: LongWord;
+    dwCurrentState: LongWord;
+    dwControlsAccepted: LongWord;
+    dwWin32ExitCode: LongWord;
+    dwServiceSpecificExitCode: LongWord;
+    dwCheckPoint: LongWord;
+    dwWaitHint: LongWord;
+  end;
+
+function OpenSCManagerW(lpMachineName, lpDatabaseName: String; dwDesiredAccess: LongWord): LongWord;
+  external 'OpenSCManagerW@advapi32.dll stdcall';
+function OpenServiceW(hSCManager: LongWord; lpServiceName: String; dwDesiredAccess: LongWord): LongWord;
+  external 'OpenServiceW@advapi32.dll stdcall';
+function QueryServiceStatus(hService: LongWord; var lpServiceStatus: SERVICE_STATUS): Boolean;
+  external 'QueryServiceStatus@advapi32.dll stdcall';
+function CloseServiceHandle(hSCObject: LongWord): Boolean;
+  external 'CloseServiceHandle@advapi32.dll stdcall';
+
+// Возвращает dwCurrentState (1=STOPPED..) или 0, если службы/менеджера
+// нет вовсе или запрос не прошёл — 0 трактуем как "остановлена" ниже
+// (нет службы — нечему мешать замене файлов).
+function GetServiceState(const ServiceName: String): LongWord;
+var
+  hSCM, hSvc: LongWord;
+  Status: SERVICE_STATUS;
+begin
+  Result := 0;
+  hSCM := OpenSCManagerW('', '', SC_MANAGER_CONNECT);
+  if hSCM = 0 then Exit;
+  try
+    hSvc := OpenServiceW(hSCM, ServiceName, SERVICE_QUERY_STATUS);
+    if hSvc = 0 then Exit;
+    try
+      if QueryServiceStatus(hSvc, Status) then
+        Result := Status.dwCurrentState;
+    finally
+      CloseServiceHandle(hSvc);
+    end;
+  finally
+    CloseServiceHandle(hSCM);
+  end;
+end;
+
+function WaitForServiceStopped(const ServiceName: String; TimeoutMs: Integer): Boolean;
+var
+  Elapsed: Integer;
+  State: LongWord;
+begin
+  Elapsed := 0;
+  repeat
+    State := GetServiceState(ServiceName);
+    if (State = SERVICE_STOPPED) or (State = 0) then
+    begin
+      Result := True;
+      Exit;
+    end;
+    Sleep(250);
+    Elapsed := Elapsed + 250;
+  until Elapsed >= TimeoutMs;
+  Result := False;
 end;
 
 { Ревью п.1: константа username (без фигурных скобок в этом комментарии
@@ -190,7 +268,14 @@ begin
     файлы -> запустить. Файлы ещё заняты, пока служба жива, поэтому это
     должно случиться ДО копирования в ssInstall, не после. }
   if ServiceExists('{#MyServiceName}') then
+  begin
     Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Ревью п.6 — см. комментарий у WaitForServiceStopped выше: без этого
+    // копирование файлов чуть ниже (ssInstall) могло начаться раньше, чем
+    // процесс службы реально освободил свой exe.
+    if not WaitForServiceStopped('{#MyServiceName}', 30000) then
+      RaiseException('Служба vless-tunnel не остановилась за 30 секунд — прерываю установку, файлы могли остаться занятыми.');
+  end;
 end;
 
 procedure InstallOrUpdateService;
@@ -293,6 +378,22 @@ begin
   end;
 end;
 
+// Ревью п.6: doctor теперь строго ПОСЛЕ гарантированной остановки службы
+// (WaitForServiceStopped), не декларативным списком [UninstallRun], где
+// порядок "doctor -> sc stop" снимал WFP-фильтры у ещё живой службы.
+procedure StopAndCleanupServiceForUninstall;
+var
+  ResultCode: Integer;
+begin
+  if ServiceExists('{#MyServiceName}') then
+  begin
+    Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    WaitForServiceStopped('{#MyServiceName}', 30000); // best-effort при удалении — не прерываем деинсталляцию по таймауту
+  end;
+  Exec(ExpandConstant('{app}\{#MyServiceExeName}'), 'doctor', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   case CurUninstallStep of
@@ -306,6 +407,7 @@ begin
             'Удалить настройки vless-tunnel (ссылку на сервер и параметры)?' + #13#10 + #13#10 +
             'Нет — настройки останутся и подхватятся при следующей установке.',
             mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+        StopAndCleanupServiceForUninstall;
       end;
     usPostUninstall:
       if DeleteSettings then
