@@ -52,7 +52,58 @@ public sealed class TunnelController
         // приёмки этапа 6 не выполнялось — set-link держался только в
         // памяти процесса и терялся при каждом рестарте службы.
         _linkFilePath = Path.Combine(Path.GetDirectoryName(_configPath) ?? ".", "link.txt");
+        _desiredStateFilePath = Path.Combine(Path.GetDirectoryName(_configPath) ?? ".", "desired-state.txt");
         TryLoadPersistedLink();
+    }
+
+    // Ревью п.10: OnStart поднимал только IPC — туннель ВСЕГДА стартовал
+    // в Off, желаемое состояние нигде не хранилось. Постоянные
+    // (persistent) WFP-фильтры при этом переживают и падение процесса, и
+    // перезагрузку (см. doc-комментарий KillSwitch) — то есть после
+    // reboot с включённым туннелем машина грузилась БЕЗ интернета
+    // (фильтры на месте, TUN/xray — нет) до ручного включения; а
+    // `sc failure` (этап 3.9) перезапускал упавшую службу, но туннель
+    // не поднимал — сам механизм автовосстановления не достигал цели.
+    private readonly string _desiredStateFilePath;
+
+    private void SaveDesiredState(bool on)
+    {
+        try { File.WriteAllText(_desiredStateFilePath, on ? "on" : "off"); }
+        catch (Exception ex) { _log($"Не удалось сохранить желаемое состояние туннеля: {ex.Message}"); }
+    }
+
+    /// <summary>Вызывается один раз при старте службы (после конструктора,
+    /// см. VlessTunnelWindowsService.OnStart) — не из конструктора: сама
+    /// попытка поднять туннель асинхронна и может занять секунды, а
+    /// конструктор обязан быть мгновенным.</summary>
+    public async Task RestoreDesiredStateAsync(CancellationToken ct)
+    {
+        var desiredOn = File.Exists(_desiredStateFilePath) && File.ReadAllText(_desiredStateFilePath).Trim() == "on";
+        if (desiredOn && _link is not null)
+        {
+            _log("Желаемое состояние — туннель включён, поднимаю после старта службы");
+            try { await OnAsync(ct); }
+            catch (Exception ex) { _log($"Не удалось восстановить туннель после старта службы: {ex.Message}"); }
+            return;
+        }
+
+        // Желаемое состояние — выключено (или ещё не решено, первый
+        // запуск) — но постоянные WFP-фильтры переживают падение
+        // процесса/перезагрузку. Если служба стартовала НЕ подняв
+        // туннель (наш собственный процесс), а фильтры уже есть —
+        // это осиротевшие фильтры от предыдущего сеанса, снимаем сами,
+        // не дожидаясь, пока пользователь заметит "нет интернета" и
+        // сам полезет за doctor.
+        try
+        {
+            var removed = Native.KillSwitch.Doctor(s => _log($"doctor (старт службы): {s}"));
+            if (removed > 0)
+                _log($"Старт службы: снято {removed} осиротевших WFP-фильтров (желаемое состояние — выключено)");
+        }
+        catch (Exception ex)
+        {
+            _log($"doctor при старте службы упал: {ex.Message}");
+        }
     }
 
     private void TryLoadPersistedLink()
@@ -156,6 +207,7 @@ public sealed class TunnelController
                 await _manager.StartAsync(_link, ct);
                 _error = null;
                 SetState(TunnelState.On);
+                SaveDesiredState(on: true); // ревью п.10 — переживает падение/перезапуск службы
             }
             catch (Exception ex)
             {
@@ -191,6 +243,7 @@ public sealed class TunnelController
             await SafeStopAsync();
             _error = null;
             SetState(TunnelState.Off);
+            SaveDesiredState(on: false); // ревью п.10 — переживает падение/перезапуск службы
         }
         finally
         {

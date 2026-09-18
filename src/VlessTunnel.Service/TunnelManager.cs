@@ -284,6 +284,18 @@ public sealed class TunnelManager : IAsyncDisposable
     private void AddHostRoute()
     {
         var prefixLength = (byte)(_serverIp!.AddressFamily == AddressFamily.InterNetwork ? 32 : 128);
+        // Ревью п.10 (найдено при живом тесте самого фикса восстановления
+        // состояния): после НЕштатной смерти службы (Stop-Process -Force,
+        // падение, обрыв питания) хост-маршрут, добавленный СТАРЫМ
+        // процессом, остаётся в таблице маршрутов — teardown-список живёт
+        // только в памяти процесса и с ним же теряется. Новый процесс,
+        // пытаясь поднять туннель заново, падал на CreateIpForwardEntry2
+        // "уже существует" — WithRetry (ниже) на этот конкретный вызов не
+        // помогает: это НЕ гонка с ОС ("ещё не готова"), а буквально уже
+        // существующая запись, которая сама по себе никуда не денется.
+        // Снимаем возможный осиротевший маршрут ПЕРЕД добавлением —
+        // best-effort — если ничего не найдено, TrySafe просто это проглотит.
+        TrySafe(() => RouteManager.RemoveRoute(_serverIp, prefixLength, _physicalGateway, _physicalIfIndex), "снятие возможного осиротевшего хост-маршрута перед добавлением");
         WithRetry(() => RouteManager.AddRoute(_serverIp, prefixLength, _physicalGateway, _physicalIfIndex, metric: 0));
         _log($"Хост-маршрут до сервера: {_serverIp}/{prefixLength} via {_physicalGateway} (ifIndex={_physicalIfIndex})");
     }
