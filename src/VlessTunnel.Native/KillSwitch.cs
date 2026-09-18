@@ -189,6 +189,80 @@ public static class KillSwitch
         }
     }
 
+    /// <summary>
+    /// Аварийное снятие (план, 3.3/3.9: "doctor снимает фильтры") —
+    /// в отличие от <see cref="Uninstall"/> не полагается на список
+    /// известных фиксированных GUID, а перечисляет ВСЕ фильтры в системе
+    /// и снимает те, чей provider/sublayer совпадает с нашим. Находит и
+    /// снимает фильтры, даже если список GUID в будущей версии кода
+    /// разойдётся с тем, что реально стоит в системе (например, после
+    /// обновления с более старой версии). Возвращает число снятых
+    /// фильтров. Черновик той же идеи (но через ручное чтение смещений
+    /// байт вместо Marshal.PtrToStructure) уже был написан заранее в
+    /// vm/rescue.ps1 для случая, когда файлов программы уже нет вовсе —
+    /// rescue.ps1 должен остаться самостоятельным и не звать этот метод.
+    /// </summary>
+    public static int Doctor(Action<string>? trace = null)
+    {
+        void Trace(string s) { trace?.Invoke(s); }
+
+        var err = WfpEngine.FwpmEngineOpen0(out var engine);
+        if (err != WfpEngine.NO_ERROR) throw new Win32Exception((int)err, "FwpmEngineOpen0 failed");
+        try
+        {
+            var removed = 0;
+            Trace("Doctor: FwpmFilterCreateEnumHandle0...");
+            err = WfpEngine.FwpmFilterCreateEnumHandle0(engine, 0, out var enumHandle);
+            if (err != WfpEngine.NO_ERROR) throw new Win32Exception((int)err, "FwpmFilterCreateEnumHandle0 failed");
+            try
+            {
+                err = WfpEngine.FwpmFilterEnum0(engine, enumHandle, 4096, out var entries, out var returned);
+                if (err != WfpEngine.NO_ERROR) throw new Win32Exception((int)err, "FwpmFilterEnum0 failed");
+                Trace($"Doctor: enumerated {returned} filters total");
+                try
+                {
+                    var ptrs = new nint[returned];
+                    if (returned > 0) Marshal.Copy(entries, ptrs, 0, (int)returned);
+                    foreach (var p in ptrs)
+                    {
+                        var filter = Marshal.PtrToStructure<FWPM_FILTER0>(p);
+                        var hasProvider = filter.providerKey != 0;
+                        var providerKey = hasProvider ? Marshal.PtrToStructure<Guid>(filter.providerKey) : Guid.Empty;
+                        if ((hasProvider && providerKey == ProviderGuid) || filter.subLayerKey == SublayerGuid)
+                        {
+                            var key = filter.filterKey;
+                            var d = WfpEngine.FwpmFilterDeleteByKey0(engine, ref key);
+                            Trace($"Doctor: filter {key} delete=0x{d:X}");
+                            if (d == WfpEngine.NO_ERROR) removed++;
+                        }
+                    }
+                }
+                finally
+                {
+                    WfpEngine.FwpmFreeMemory0(ref entries);
+                }
+            }
+            finally
+            {
+                WfpEngine.FwpmFilterDestroyEnumHandle0(engine, enumHandle);
+            }
+
+            var sl = SublayerGuid;
+            var slErr = WfpEngine.FwpmSubLayerDeleteByKey0(engine, ref sl);
+            Trace($"Doctor: sublayer delete=0x{slErr:X}");
+
+            var pv = ProviderGuid;
+            var pvErr = WfpEngine.FwpmProviderDeleteByKey0(engine, ref pv);
+            Trace($"Doctor: provider delete=0x{pvErr:X}");
+
+            return removed;
+        }
+        finally
+        {
+            WfpEngine.FwpmEngineClose0(engine);
+        }
+    }
+
     private static void AddProviderAndSublayer(nint engine, Action<string> trace)
     {
         trace("AddProviderAndSublayer: provider...");

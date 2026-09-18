@@ -1,5 +1,6 @@
 using VlessTunnel.Core;
 using VlessTunnel.Core.Models;
+using VlessTunnel.Native;
 using VlessTunnel.Service;
 
 // Временный отладочный вход (план, этап 2: "on/off через временный
@@ -7,18 +8,40 @@ using VlessTunnel.Service;
 //
 // Использование:
 //   VlessTunnel.Service.exe run <файл-со-ссылкой> <путь-к-xray.exe> <рабочая-директория> [--duration N] [--killswitch]
+//   VlessTunnel.Service.exe doctor
 //
-// Поднимает туннель и ждёт Ctrl+C, строки "off" на stdin, либо (если
+// run поднимает туннель и ждёт Ctrl+C, строки "off" на stdin, либо (если
 // передан --duration) N секунд — затем аккуратно всё снимает и
 // завершается. --duration нужен только для автоматических прогонов на
 // стенде без интерактивного stdin (пайпы с задержкой через PowerShell на
 // SSH ненадёжно передают вход именно в момент задержки, а не сразу же
 // после её истечения) — в реальном сценарии on/off всегда будут приходить
 // по IPC (этап 4), не через эту заглушку.
+//
+// doctor (план, 3.3/3.9) — аварийный поиск и снятие зависших WFP-
+// фильтров kill-switch'а, даже если они остались от процесса, который
+// уже не запущен (например, после сбоя без штатного off).
+
+if (args.Length >= 1 && args[0] == "doctor")
+{
+    void DoctorLog(string message) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+    try
+    {
+        var removed = KillSwitch.Doctor(DoctorLog);
+        DoctorLog($"Снято фильтров: {removed}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        DoctorLog($"doctor упал: {ex}");
+        return 1;
+    }
+}
 
 if (args.Length < 3 || args[0] != "run")
 {
-    Console.Error.WriteLine("Использование: run <файл-со-ссылкой> <путь-к-xray.exe> <рабочая-директория> [--duration N]");
+    Console.Error.WriteLine("Использование: run <файл-со-ссылкой> <путь-к-xray.exe> <рабочая-директория> [--duration N] [--killswitch]");
+    Console.Error.WriteLine("           или: doctor");
     return 1;
 }
 
