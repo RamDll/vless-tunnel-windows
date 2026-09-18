@@ -105,8 +105,14 @@ public sealed class TunnelManager : IAsyncDisposable
             RedirectStandardError = true,
         };
         _xrayProcess = Process.Start(xrayStart) ?? throw new InvalidOperationException($"Не удалось запустить {_xrayExePath}");
-        _xrayProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) _log($"xray: {e.Data}"); };
-        _xrayProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) _log($"xray[err]: {e.Data}"); };
+        // Redact.Secrets — защита от гипотетической, но не исключённой
+        // утечки: в норме xray на loglevel=warning не печатает содержимое
+        // конфига, но при ошибке разбора конфига МОГ БЫ процитировать его
+        // фрагмент, включая UUID (план: "секреты не попадают в вывод").
+        // Чужой процесс, его вывод — не наш контракт, поэтому фильтруем
+        // защитно, а не полагаемся на то, что xray никогда так не сделает.
+        _xrayProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) _log($"xray: {Redact.Secrets(e.Data)}"); };
+        _xrayProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) _log($"xray[err]: {Redact.Secrets(e.Data)}"); };
         _xrayProcess.BeginOutputReadLine();
         _xrayProcess.BeginErrorReadLine();
         _job.Assign(_xrayProcess);
