@@ -1,3 +1,5 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.ServiceProcess;
 using VlessTunnel.Core;
 
@@ -35,6 +37,7 @@ public sealed class VlessTunnelWindowsService : ServiceBase
     protected override void OnStart(string[] args)
     {
         Directory.CreateDirectory(_workDir);
+        SecureConfigDirectory(_workDir);
         _cts = new CancellationTokenSource();
         _fileLogger = new RotatingFileLogger(Path.Combine(_workDir, "logs"));
 
@@ -55,6 +58,35 @@ public sealed class VlessTunnelWindowsService : ServiceBase
             catch (OperationCanceledException) { }
             catch (Exception ex) { Log($"IpcServer упал: {ex}"); }
         });
+    }
+
+    // Ревью п.2: %ProgramData% наследуемо даёт группе "Пользователи"
+    // Read+Execute — link.txt (секретный UUID/pbk/sid VLESS-ссылки) и
+    // config-service.json читал любой локальный пользователь, а не только
+    // тот, кому явно разрешён IPC (--allow-user). На этом фоне редакция
+    // UUID в логах (Redact.cs) была бессмысленна — секрет и так лежал
+    // открытым файлом. Подтверждено живым тестом (icacls — Users:(RX)
+    // до фикса). Снимаем унаследованные правила целиком (isProtected=true,
+    // preserveInheritance=false) и оставляем только SYSTEM+Администраторы —
+    // план (раздел 2) требует именно это. Вызывается на КАЖДОМ старте
+    // службы, не только при первом создании каталога — чтобы каталоги от
+    // установок ДО этого фикса тоже приводились к нужным правам, не только
+    // свежесозданные.
+    private static void SecureConfigDirectory(string path)
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None,
+            AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None,
+            AccessControlType.Allow));
+        new DirectoryInfo(path).SetAccessControl(security);
     }
 
     protected override void OnStop()
