@@ -121,7 +121,18 @@ jobs:
           if ($env:SIGNING_PFX_BASE64 -and $env:SIGNING_PFX_PASSWORD) {
             $pfxPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
             [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
-            $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+            # Путь signtool.exe под Windows Kits версионирован по сборке
+            # SDK (bin\<версия>\x64\...), а не просто bin\x64\... —
+            # захардкоженный путь не существовал на раннере windows-latest
+            # (падало "is not recognized as an internal or external
+            # command" — файла просто не было по этому пути), нашлось
+            # только живым прогоном на GitHub Actions. Ищем реальный файл,
+            # берём самую свежую версию SDK, если их несколько.
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+            if (-not $signtool) {
+              throw "signtool.exe не найден под '${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe' — проверьте, что Windows SDK установлен на раннере."
+            }
             # Команда подписи вынесена в отдельный .cmd, а не передана
             # прямо в /Ssigntool=... одной строкой — PowerShell ломает
             # передачу нативному процессу аргумента, который сам содержит
