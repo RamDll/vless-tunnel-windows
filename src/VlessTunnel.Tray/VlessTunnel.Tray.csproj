@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VlessTunnel.Tray</RootNamespace>
+    <ApplicationIcon>..\..\packaging\icons\vless-tunnel.ico</ApplicationIcon>
+    <!-- WinForms-таргеты по умолчанию отказываются кросс-компилироваться
+         не на Windows (в отличие от обычных net*-windows проектов вроде
+         VlessTunnel.Native/Service/Cli) — явно разрешаем, сборка всё
+         равно идёт кросс-компиляцией с Linux-хоста, запускается только
+         на стенде. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- WinForms, не WPF — план, 3.6, только значок + простое меню + одно
+         окно, NotifyIcon для этого хватает без лишней инфраструктуры. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../VlessTunnel.Core/VlessTunnel.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Иконки состояния трея (план, 3.6: "иконки из packaging/icons
+         Linux-версии") — те же SVG (перегенерированы в .ico, у Windows
+         нет нативной поддержки SVG для NotifyIcon). -->
+    <None Include="..\..\packaging\icons\tray-on.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\packaging\icons\tray-off.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\packaging\icons\tray-unknown.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

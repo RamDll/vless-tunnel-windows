@@ -4,6 +4,7 @@
     <Project Path="src/VlessTunnel.Native/VlessTunnel.Native.csproj" />
     <Project Path="src/VlessTunnel.Service/VlessTunnel.Service.csproj" />
     <Project Path="src/VlessTunnel.Cli/VlessTunnel.Cli.csproj" />
+    <Project Path="src/VlessTunnel.Tray/VlessTunnel.Tray.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/VlessTunnel.Core.Tests/VlessTunnel.Core.Tests.csproj" />
