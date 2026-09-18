@@ -203,7 +203,24 @@ public sealed class TunnelController
             if (_link is null) throw new InvalidOperationException("Ссылка не задана (сначала set-link)");
 
             SetState(TunnelState.Starting);
-            _manager = new TunnelManager(new WindowsConfigOptions { Outbound = new BuildOptions() }, _xrayExePath, _configPath, _log, _killSwitch);
+
+            // Ревью п.12: allowInsecure=1 (TLS, не REALITY — у той своё
+            // доверие через pbk/sid) молча ничего не делал на
+            // CoreFamily=modern (дефолт) — OutboundBuilder ставит
+            // pinnedPeerCertSha256 ТОЛЬКО если он уже задан, а задавать
+            // его было некому. Получаем отпечаток ДО сборки конфига (он
+            // неизменяемый init-параметр BuildOptions) — тот же порядок,
+            // что и Bootstrap-резолв ниже в TunnelManager.StartAsync.
+            string? certPin = null;
+            if (_link.Security == "tls" && _link.AllowInsecure)
+            {
+                certPin = await CertPinResolver.ResolveAsync(_link.Host, _link.Port, _link.Sni, ct);
+                _log(certPin is not null
+                    ? "allowInsecure: получен отпечаток TLS-сертификата сервера (pinnedPeerCertSha256)"
+                    : "allowInsecure=1 в ссылке, но отпечаток сертификата получить не удалось — соединение может не установиться");
+            }
+
+            _manager = new TunnelManager(new WindowsConfigOptions { Outbound = new BuildOptions { CertPin = certPin } }, _xrayExePath, _configPath, _log, _killSwitch);
             // Ревью п.9: план (3.2) требует перезапуск при смене IP сервера —
             // раньше периодического перерезолва не было вовсе, при смене
             // A-записи туннель молча продолжал стучаться в старый адрес до
