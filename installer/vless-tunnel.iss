@@ -1,11 +1,10 @@
 ; Установщик vless-tunnel (план, 3.7/3.8) — Inno Setup.
 ;
-; Не компилировался и не тестировался живьём в этой сессии (Inno Setup —
-; отдельный Windows-инструмент, которого нет на Linux-хосте, где идёт
-; вся остальная сборка кросс-компиляцией) — написан по плану и
-; перепроверен на непротиворечивость логики шагов, но требует реального
-; прогона ISCC.exe + живой установки/обновления/удаления на стенде,
-; прежде чем считаться готовым (план, этап 6, критерии приёмки).
+; Живьём прогнан на стенде (план, этап 6): чистая установка, обновление
+; поверх, удаление с «Да»/«Нет», переустановка, тихое удаление —
+; реальным ISCC.exe 6.7.3. Не проверено — только то, для чего нужен
+; настоящий сертификат (реальная подпись через signtool, сам
+; installer/trust.ps1).
 ;
 ; Ожидает, что CI (.github/workflows/build.yml) соберёт в {#SourceDir}
 ; ОДНУ папку со всеми тремя self-contained публикациями (Service/Cli/Tray
@@ -37,6 +36,18 @@
 #ifndef CertThumbprint
   #define CertThumbprint ""
 #endif
+; Директива SignTool= требует, чтобы соответствующий /Ssigntool=...
+; ВСЕГДА был передан в командной строке ISCC — если его нет (сборка без
+; секретов подписи), сам факт присутствия директивы валит компиляцию с
+; "Value of [Setup] section directive SignTool is invalid" ещё на
+; разборе [Setup], до какого-либо реального шага подписи (найдено живым
+; прогоном CI на GitHub Actions — падало на КАЖДОМ пуше, а не только
+; там, где секретов нет: директива безусловная, а /Ssigntool CI кладёт
+; только при наличии секретов). Поэтому весь блок подписи — под тем же
+; переключателем, что и сам /Ssigntool в build.yml (/DSignInstaller=1).
+#ifndef SignInstaller
+  #define SignInstaller ""
+#endif
 
 [Setup]
 AppId={{B7E4B7B4-6B9E-4C7C-9B1A-9F2E7B7C9A1D}
@@ -52,12 +63,15 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#MyTrayExeName}
+#if SignInstaller != ""
 ; Реальная подпись — именованный инструмент, команду которой задаёт CI
 ; через ISCC /Ssigntool=... (сам .pfx там же, из секретов, никогда в
-; репозитории). Без /Ssigntool сборка просто не подписывает — годится
-; для локальных пробных сборок на стенде.
+; репозитории). Присутствует только когда CI реально передаёт
+; /DSignInstaller=1 вместе с /Ssigntool= — иначе директива без
+; определения ломает компиляцию (см. комментарий у #define выше).
 SignTool=signtool
 SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
