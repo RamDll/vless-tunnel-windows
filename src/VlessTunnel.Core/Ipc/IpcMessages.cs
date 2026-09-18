@@ -20,6 +20,7 @@ public static class IpcCommands
     public const string SetLink = "set-link";
     public const string Subscribe = "subscribe";
     public const string Doctor = "doctor";
+    public const string Test = "test";
 }
 
 public sealed class IpcRequest
@@ -36,6 +37,16 @@ public sealed class IpcResponse
     public string? Error { get; init; }
     public TunnelStatus? Status { get; init; }
     public int? DoctorRemoved { get; init; }
+    public TestResults? Test { get; init; }
+}
+
+/// <summary>Результаты `test` (план, 3.5) — HTTP/SOCKS5/прозрачный TCP/DNS.</summary>
+public sealed class TestResults
+{
+    public required bool Http { get; init; }
+    public required bool Socks5 { get; init; }
+    public required bool TransparentTcp { get; init; }
+    public required bool Dns { get; init; }
 }
 
 /// <summary>Асинхронное событие подписки (план, 3.4: "трей не опрашивает службу по таймеру").</summary>

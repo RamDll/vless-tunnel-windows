@@ -47,7 +47,7 @@ if (cmd == "watch")
     return 0;
 }
 
-var notYetImplemented = new HashSet<string> { "test", "logs", "autostart", "update-core", "ensure", "uninstall" };
+var notYetImplemented = new HashSet<string> { "logs", "autostart", "update-core", "ensure", "uninstall" };
 if (notYetImplemented.Contains(cmd))
 {
     Console.Error.WriteLine($"\"{cmd}\" ещё не реализовано на сервере (этап 4 покрывает on/off/toggle/restart/status/set-link/doctor).");
@@ -62,6 +62,7 @@ var timeoutMs = cmd switch
 {
     IpcCommands.On or IpcCommands.Off or IpcCommands.Toggle or IpcCommands.Restart => 90_000,
     IpcCommands.Doctor => 30_000,
+    IpcCommands.Test => 40_000, // 4 проверки по ~6с таймаута каждая, последовательно
     _ => 10_000,
 };
 
@@ -134,6 +135,16 @@ if (cmd == IpcCommands.Status)
 else if (cmd == IpcCommands.Doctor)
 {
     Console.WriteLine($"Снято фильтров: {response.DoctorRemoved}");
+}
+else if (cmd == IpcCommands.Test)
+{
+    var t = response.Test;
+    if (t is null) { Console.WriteLine("Нет результатов."); return 6; }
+    Console.WriteLine($"HTTP (127.0.0.1:10809):          {(t.Http ? "OK" : "FAIL")}");
+    Console.WriteLine($"SOCKS5 (127.0.0.1:10808):        {(t.Socks5 ? "OK" : "FAIL")}");
+    Console.WriteLine($"Прозрачный TCP (1.1.1.1:443):    {(t.TransparentTcp ? "OK" : "FAIL")}");
+    Console.WriteLine($"DNS (example.com):                {(t.Dns ? "OK" : "FAIL")}");
+    return t is { Http: true, Socks5: true, TransparentTcp: true, Dns: true } ? 0 : 7;
 }
 else
 {

@@ -135,6 +135,9 @@ public sealed class IpcServer
                 case IpcCommands.Doctor:
                     var removed = Native.KillSwitch.Doctor(s => _log($"doctor: {s}"));
                     return new IpcResponse { Ok = true, DoctorRemoved = removed };
+                case IpcCommands.Test:
+                    var results = await TunnelTester.RunAsync();
+                    return new IpcResponse { Ok = true, Test = results };
                 default:
                     return new IpcResponse { Ok = false, Error = $"unknown command: {req.Cmd}" };
             }

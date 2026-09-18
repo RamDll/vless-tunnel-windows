@@ -126,13 +126,19 @@ public sealed class LinkForm : Form
 
     private async Task TestAsync()
     {
-        // "test" ещё не реализован на сервере (план, 3.5 — этап 7, живые
-        // проверки HTTP/SOCKS5/UDP/DNS) — кнопка честно показывает это,
-        // а не притворяется рабочей.
+        // План, 3.5: HTTP/SOCKS5/прозрачный TCP/DNS (без UDP/QUIC — см.
+        // комментарий у VlessTunnel.Service.TunnelTester).
         try
         {
-            var resp = await _ipc.SendAsync(new IpcRequest { Cmd = "test" }, TimeSpan.FromSeconds(10));
-            AppendLogLine(resp.Ok ? "test: OK" : $"test: {resp.Error}");
+            var resp = await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.Test }, TimeSpan.FromSeconds(40));
+            if (resp is { Ok: true, Test: { } t })
+            {
+                AppendLogLine($"test: HTTP={(t.Http ? "OK" : "FAIL")} SOCKS5={(t.Socks5 ? "OK" : "FAIL")} TCP={(t.TransparentTcp ? "OK" : "FAIL")} DNS={(t.Dns ? "OK" : "FAIL")}");
+            }
+            else
+            {
+                AppendLogLine($"test: {resp.Error}");
+            }
         }
         catch (Exception ex)
         {
