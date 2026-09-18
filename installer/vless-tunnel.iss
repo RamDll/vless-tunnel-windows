@@ -136,6 +136,52 @@ begin
   Result := ResultCode = 0;
 end;
 
+{ Ревью п.1: константа username (без фигурных скобок в этом комментарии
+  нарочно — препроцессор ISPP пытается раскрыть их как ссылку на
+  константу даже внутри Pascal-комментария, находка ещё с этапа
+  установки install.cmd) — это
+  ПОЛЬЗОВАТЕЛЬ, ОТ ИМЕНИ КОТОРОГО РЕАЛЬНО ЗАПУЩЕН Setup.exe, а не
+  обязательно интерактивно вошедший в Windows. self-update (SelfUpdater.cs)
+  запускает установщик из процесса САМОЙ службы (LocalSystem) — тихо, без
+  показа мастера, поэтому username там резолвится в SYSTEM (подтверждено
+  живым тестом: sc qc после такого запуска показывал --allow-user
+  "Система"/SYSTEM вместо реального пользователя). Итог — обычный
+  пользователь после КАЖДОГО self-update терял доступ к именованному
+  каналу, ровно тот же симптом, что был у тестировщика при отсутствующем
+  --allow-user вовсе.
+  Читаем ИМЯ ПОЛЬЗОВАТЕЛЯ ИЗ УЖЕ ЗАРЕГИСТРИРОВАННОГО ImagePath службы
+  (реестр, не sc.exe — вывод sc.exe локализован по меткам полей,
+  "BINARY_PATH_NAME" на русской Windows превращается в нечитаемый
+  русский текст, парсить по метке ненадёжно) — если служба уже
+  существует, её текущий --allow-user переживает апгрейд НЕЗАВИСИМО от
+  того, кто/что запустило установщик в этот раз. Только для ПЕРВОЙ
+  установки (службы ещё нет) используется username — единственный
+  момент, где он гарантированно совпадает с живым, интерактивным
+  пользователем, который и подтверждал UAC. }
+function ExtractAllowUser(const BinPath: String): String;
+var
+  Marker: String;
+  MarkerPos, QuoteStart, QuoteEnd: Integer;
+begin
+  Result := '';
+  Marker := '--allow-user "';
+  MarkerPos := Pos(Marker, BinPath);
+  if MarkerPos = 0 then Exit;
+  QuoteStart := MarkerPos + Length(Marker);
+  QuoteEnd := Pos('"', Copy(BinPath, QuoteStart, MaxInt));
+  if QuoteEnd = 0 then Exit;
+  Result := Copy(BinPath, QuoteStart, QuoteEnd - 1);
+end;
+
+function GetExistingAllowUser(const ServiceName: String): String;
+var
+  ImagePath: String;
+begin
+  Result := '';
+  if RegQueryStringValue(HKLM, 'SYSTEM\CurrentControlSet\Services\' + ServiceName, 'ImagePath', ImagePath) then
+    Result := ExtractAllowUser(ImagePath);
+end;
+
 procedure StopExistingService;
 var
   ResultCode: Integer;
@@ -150,7 +196,7 @@ end;
 procedure InstallOrUpdateService;
 var
   ResultCode: Integer;
-  BinPath, StartType: String;
+  BinPath, StartType, AllowUser, ExistingAllowUser: String;
 begin
   { sc.exe ожидает значение binPath= одним аргументом командной строки:
     внешние кавычки — потому что весь аргумент содержит пробелы, ВНУТРИ
@@ -176,8 +222,22 @@ begin
     трей запускался только через Планировщик заданий с повышением, что
     маскировало баг целиком. Константа username — тот, кто ставит
     программу (тот же, кто подтверждал UAC), что верно для обычного
-    случая "себе на свой ПК". }
-  BinPath := '\"' + ExpandConstant('{app}\{#MyServiceExeName}') + '\" service --allow-user \"' + ExpandConstant('{username}') + '\"';
+    случая "себе на свой ПК" — НО только пока установщик запущен САМИМ
+    этим человеком. self-update запускает установщик из процесса службы
+    (LocalSystem) — тогда username резолвится в SYSTEM, а не в реального
+    пользователя (см. ExtractAllowUser/GetExistingAllowUser выше и запись
+    в PLAN-windows.md, "Ревью п.1" — подтверждено живым тестом). Поэтому
+    при АПГРЕЙДЕ поверх уже существующей службы её текущий --allow-user
+    переносится как есть, а username идёт в ход только при первой
+    установке, когда службы ещё нет. }
+  ExistingAllowUser := '';
+  if ServiceExists('{#MyServiceName}') then
+    ExistingAllowUser := GetExistingAllowUser('{#MyServiceName}');
+  if ExistingAllowUser <> '' then
+    AllowUser := ExistingAllowUser
+  else
+    AllowUser := ExpandConstant('{username}');
+  BinPath := '\"' + ExpandConstant('{app}\{#MyServiceExeName}') + '\" service --allow-user \"' + AllowUser + '\"';
   { Раньше зависело от чекбокса "autostartservice" (checkedonce, то есть
     включён по умолчанию в мастере) — но /VERYSILENT/-SILENT (в том числе
     self-update, он всегда тихий) не выбирают вообще никаких задач, даже
@@ -195,7 +255,14 @@ begin
 
   if ServiceExists('{#MyServiceName}') then
   begin
+    { Раньше код возврата не проверялся вовсе — при сбое (например, та же
+      "испорченная строка binPath" из комментария выше, которая когда-то
+      ломала sc create) апгрейд молча оставлял службу со СТАРЫМ binPath,
+      ничем не сигналя об этом (в отличие от ветки sc create ниже, которая
+      уже кидает исключение). }
     Exec(ExpandConstant('{sys}\sc.exe'), 'config {#MyServiceName} binPath= "' + BinPath + '" start= ' + StartType, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if ResultCode <> 0 then
+      RaiseException('Не удалось обновить службу vless-tunnel (sc config, код ' + IntToStr(ResultCode) + ').');
   end
   else
   begin
