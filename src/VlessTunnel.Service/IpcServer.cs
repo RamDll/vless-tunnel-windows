@@ -145,6 +145,9 @@ public sealed class IpcServer
                 case IpcCommands.Test:
                     var results = await TunnelTester.RunAsync();
                     return new IpcResponse { Ok = true, Test = results };
+                case IpcCommands.CaptivePortal:
+                    await _controller.CaptivePortalBypassAsync(TimeSpan.FromMinutes(5));
+                    return new IpcResponse { Ok = true, Status = _controller.GetStatus() };
                 default:
                     return new IpcResponse { Ok = false, Error = $"unknown command: {req.Cmd}" };
             }

@@ -163,6 +163,7 @@ public sealed class MainWindow : Form
         menu.Items.Add("Проверить туннель", null, async (_, _) => await RunTestAsync());
         menu.Items.Add("Показать журнал", null, (_, _) => ShowLog());
         menu.Items.Add("Диагностика", null, async (_, _) => await RunDoctorAsync());
+        menu.Items.Add("Пустить на 5 минут напрямую", null, async (_, _) => await RunCaptivePortalBypassAsync());
         menu.Items.Add(new ToolStripSeparator());
         var uninstall = new ToolStripMenuItem("Удалить") { ForeColor = Color.FromArgb(0xB2, 0x3A, 0x2E) };
         uninstall.Click += (_, _) => RunUninstaller();
@@ -245,6 +246,31 @@ public sealed class MainWindow : Form
         catch (Exception ex)
         {
             AppendLog($"Диагностика не удалась: {ex.Message}");
+        }
+    }
+
+    private async Task RunCaptivePortalBypassAsync()
+    {
+        var confirm = MessageBox.Show(
+            this,
+            "На 5 минут выключит туннель, чтобы можно было открыть страницу входа гостиничного/кафешного Wi-Fi " +
+            "(частая ситуация: сервер VLESS ещё недостижим через портал, а kill-switch уже не пускает вообще ничего). " +
+            "Через 5 минут туннель включится снова сам.\n\nПродолжить?",
+            "Пустить на 5 минут напрямую?",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes) return;
+
+        try
+        {
+            var resp = await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.CaptivePortal }, TimeSpan.FromSeconds(10));
+            AppendLog(resp.Ok
+                ? "Туннель выключен на 5 минут (captive portal) — включится снова сам."
+                : $"Не удалось выключить туннель: {resp.Error}");
+            await RefreshStatusAsync();
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Не удалось выключить туннель: {ex.Message}");
         }
     }
 

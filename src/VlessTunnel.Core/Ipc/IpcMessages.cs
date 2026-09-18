@@ -21,6 +21,7 @@ public static class IpcCommands
     public const string Subscribe = "subscribe";
     public const string Doctor = "doctor";
     public const string Test = "test";
+    public const string CaptivePortal = "captive-portal";
 }
 
 public sealed class IpcRequest

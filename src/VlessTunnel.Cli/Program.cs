@@ -63,6 +63,7 @@ var timeoutMs = cmd switch
     IpcCommands.On or IpcCommands.Off or IpcCommands.Toggle or IpcCommands.Restart => 90_000,
     IpcCommands.Doctor => 30_000,
     IpcCommands.Test => 40_000, // 4 проверки по ~6с таймаута каждая, последовательно
+    IpcCommands.CaptivePortal => 10_000, // сама пауза — 5 минут, но снятие фильтров быстрое, ответ не ждёт истечения таймера
     _ => 10_000,
 };
 
@@ -142,6 +143,10 @@ else if (cmd == IpcCommands.Doctor)
             ? $"Часы: в порядке (расхождение {skew:F0} с)"
             : $"Часы: РАСХОДЯТСЯ на {skew:F0} с с сетевым временем — REALITY/TLS может не работать, проверьте дату/время системы");
 }
+else if (cmd == IpcCommands.CaptivePortal)
+{
+    Console.WriteLine("Туннель выключен на 5 минут — пройдите вход на странице портала Wi-Fi, потом туннель включится сам.");
+}
 else if (cmd == IpcCommands.Test)
 {
     var t = response.Test;
@@ -176,5 +181,6 @@ static void PrintUsage()
           status [--json]
           set-link <ссылка> | set-link --stdin
           doctor
+          captive-portal
         """);
 }

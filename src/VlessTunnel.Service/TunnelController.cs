@@ -156,6 +156,47 @@ public sealed class TunnelController
         await OnAsync(ct);
     }
 
+    // Отложенный автовозврат после паузы captive portal — отдельное поле,
+    // не часть _gate: пользователь может нажать "ещё 5 минут" повторно,
+    // не дожидаясь предыдущего таймера.
+    private CancellationTokenSource? _captivePortalCts;
+
+    /// <summary>
+    /// Captive portal (план, 3.9) — «Пустить на 5 минут напрямую». Снять
+    /// только WFP-фильтры кило-switch'а НЕДОСТАТОЧНО: пока подняты
+    /// /1-маршруты через TUN, весь трафик всё равно роутится в адаптер, а
+    /// не напрямую через физический (xray без рабочего апстрима его
+    /// молча дропает) — снаружи это выглядит так же безнадёжно, как и с
+    /// фильтрами. Поэтому честный способ "дать пройти напрямую" — полностью
+    /// снять туннель (маршруты+TUN+kill-switch вместе, той же проверенной
+    /// машиной, что и обычный off) и автоматически поднять его обратно
+    /// через <paramref name="duration"/>, если он был включён к моменту
+    /// вызова. Сам туннель этим вызовом не включается — только
+    /// восстанавливается то, что уже было.
+    /// </summary>
+    public async Task CaptivePortalBypassAsync(TimeSpan duration)
+    {
+        _captivePortalCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _captivePortalCts = cts;
+
+        var hadManager = _manager is not null;
+        await OffAsync();
+        _log(hadManager
+            ? $"Captive portal: туннель выключен на {duration.TotalMinutes:F0} мин для прямого доступа, потом включится снова"
+            : "Captive portal: туннель и так был выключен, снимать было нечего");
+
+        if (!hadManager) return; // не было чем блокировать — нечего и восстанавливать
+
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(duration, cts.Token); }
+            catch (OperationCanceledException) { return; }
+            try { await OnAsync(CancellationToken.None); }
+            catch (Exception ex) { _log($"Captive portal: не удалось снова включить туннель после паузы: {ex.Message}"); }
+        });
+    }
+
     private async Task SafeStopAsync()
     {
         if (_manager is null) return;

@@ -44,6 +44,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         more.DropDownItems.Add("Проверить туннель", null, (_, _) => ShowWindow());
         more.DropDownItems.Add("Показать журнал", null, (_, _) => ShowWindow());
         more.DropDownItems.Add("Диагностика", null, (_, _) => ShowWindow());
+        more.DropDownItems.Add(new ToolStripSeparator());
+        // Captive portal (план, 3.9) — прямой пункт трея, не через окно:
+        // именно в момент "застрял на гостиничном Wi-Fi без интернета"
+        // открывать окно и идти в его меню — лишний шаг, когда цель ровно
+        // противоположная (сделать что-то БЫСТРО, пока не пропало терпение).
+        more.DropDownItems.Add("Пустить на 5 минут напрямую", null, async (_, _) => await CaptivePortalBypassAsync());
         menu.Items.Add(more);
 
         menu.Items.Add(new ToolStripSeparator());
@@ -82,6 +88,29 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             _window.AppendLog($"Не удалось изменить автозапуск: {ex.Message}");
+        }
+    }
+
+    private async Task CaptivePortalBypassAsync()
+    {
+        var confirm = MessageBox.Show(
+            "На 5 минут выключит туннель, чтобы можно было открыть страницу входа гостиничного/кафешного Wi-Fi " +
+            "(частая ситуация: сервер VLESS ещё недостижим через портал, а kill-switch уже не пускает вообще ничего). " +
+            "Через 5 минут туннель включится снова сам.\n\nПродолжить?",
+            "Пустить на 5 минут напрямую?",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes) return;
+
+        try
+        {
+            var resp = await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.CaptivePortal }, TimeSpan.FromSeconds(10));
+            _window.AppendLog(resp.Ok
+                ? "Туннель выключен на 5 минут (captive portal) — включится снова сам."
+                : $"Не удалось выключить туннель: {resp.Error}");
+        }
+        catch (Exception ex)
+        {
+            _window.AppendLog($"Не удалось выключить туннель: {ex.Message}");
         }
     }
 
