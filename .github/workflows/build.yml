@@ -67,6 +67,13 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    # GitHub Actions не разрешает ссылаться на secrets.* напрямую внутри
+    # if: (падает "Unrecognized named-value: 'secrets'" ещё на этапе
+    # разбора workflow, до запуска единого job'а) — задокументированная
+    # особенность (secrets не маскируются на этом этапе), обходится через
+    # промежуточную env-переменную уровня job, которую if: уже читать может.
+    env:
+      HAS_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -215,7 +222,7 @@ jobs:
       # SIGNPATH_API_TOKEN — секрет появляется только после одобрения заявки
       # на signpath.org, до этого их физически неоткуда взять.
       - name: Upload unsigned installer for SignPath
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.HAS_SIGNPATH == 'true' }}
         id: upload-unsigned-installer
         uses: actions/upload-artifact@v4
         with:
@@ -223,7 +230,7 @@ jobs:
           path: installer/Output/*.exe
 
       - name: Submit signing request to SignPath
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.HAS_SIGNPATH == 'true' }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -238,7 +245,7 @@ jobs:
           output-artifact-directory: installer/Output-signed
 
       - name: Replace installer with the SignPath-signed version
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.HAS_SIGNPATH == 'true' }}
         shell: pwsh
         run: |
           $signed = Get-ChildItem installer\Output-signed\*.exe | Select-Object -First 1
