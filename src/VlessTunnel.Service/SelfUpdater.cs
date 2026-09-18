@@ -60,8 +60,36 @@ public static class SelfUpdater
             throw new InvalidOperationException($"Отпечаток подписи установщика не совпал: {cert.Thumbprint} (ожидался {ExpectedCertThumbprint}) — НЕ запускаю");
         log($"self-update: подпись подтверждена (отпечаток {cert.Thumbprint})");
 
+        CloseRunningTray(log);
+
         Process.Start(new ProcessStartInfo(exePath, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART") { UseShellExecute = true });
         log($"self-update: установщик {release.TagName} запущен, настройки сохранятся (тихое обновление)");
         return release.TagName;
+    }
+
+    // Установщик под /VERYSILENT молча откатывает ВСЮ установку, если
+    // RestartManager не смог закрыть трей (диалог Abort/Retry/Ignore
+    // автоматически отвечает Abort в тихом режиме — установщик завершается
+    // "успешно", ничего не поменяв, а служба никак об этом не узнаёт).
+    // Трей почти всегда запущен в момент self-update (это его нормальное
+    // состояние) — нашлось живым тестом: свежий инсталлятор с исправленным
+    // автозапуском службы несколько раз подряд молча ничего не делал,
+    // пока трей был открыт. Закрываем его тут сами, а не полагаемся на
+    // RestartManager внутри установщика.
+    private static void CloseRunningTray(Action<string> log)
+    {
+        foreach (var proc in Process.GetProcessesByName("VlessTunnel.Tray"))
+        {
+            try
+            {
+                proc.CloseMainWindow();
+                if (!proc.WaitForExit(3000)) proc.Kill();
+                log("self-update: трей закрыт перед обновлением");
+            }
+            catch (Exception ex)
+            {
+                log($"self-update: не удалось закрыть трей (pid={proc.Id}): {ex.Message}");
+            }
+        }
     }
 }

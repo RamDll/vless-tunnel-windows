@@ -78,10 +78,6 @@ SignedUninstaller=yes
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
-[Tasks]
-Name: "autostartservice"; Description: "Запускать службу vless-tunnel автоматически при загрузке Windows"; Flags: checkedonce
-Name: "autostarttray"; Description: "Запускать трей vless-tunnel при входе в систему"; Flags: checkedonce
-
 [Files]
 ; Один путь к бинарникам, без копий (план, 3.7: урок Linux про дубль
 ; /usr/bin и /usr/local/bin) — все три exe и их общий рантайм лежат
@@ -91,7 +87,16 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 [Icons]
 Name: "{group}\vless-tunnel"; Filename: "{app}\{#MyTrayExeName}"
 Name: "{group}\Удалить vless-tunnel"; Filename: "{uninstallexe}"
-Name: "{commonstartup}\vless-tunnel"; Filename: "{app}\{#MyTrayExeName}"; Tasks: autostarttray
+; Без Tasks: — раньше зависело от чекбокса "autostarttray" (checkedonce),
+; но /VERYSILENT/-SILENT (в том числе self-update — он всегда тихий)
+; ничего не выбирают, даже checkedonce-задачи, если не передать /TASKS=
+; явно (живой тест: свежая /VERYSILENT-установка v0.1.0 давала службу
+; DEMAND_START несмотря на чекбокс "по умолчанию включён" в .iss —
+; нашлось это именно так, экспериментом, а не из документации). Раз
+; молчаливая тихая установка не обещает того же выбора, что и мастер,
+; проще не завязываться на неё вовсе: автозапуск трея и службы (см.
+; StartType ниже) — теперь всегда, без опции отключить в мастере.
+Name: "{commonstartup}\vless-tunnel"; Filename: "{app}\{#MyTrayExeName}"
 
 [Run]
 Filename: "{app}\{#MyTrayExeName}"; Description: "Запустить vless-tunnel сейчас"; Flags: postinstall nowait skipifsilent unchecked
@@ -173,10 +178,20 @@ begin
     программу (тот же, кто подтверждал UAC), что верно для обычного
     случая "себе на свой ПК". }
   BinPath := '\"' + ExpandConstant('{app}\{#MyServiceExeName}') + '\" service --allow-user \"' + ExpandConstant('{username}') + '\"';
-  if WizardIsTaskSelected('autostartservice') then
-    StartType := 'auto'
-  else
-    StartType := 'demand';
+  { Раньше зависело от чекбокса "autostartservice" (checkedonce, то есть
+    включён по умолчанию в мастере) — но /VERYSILENT/-SILENT (в том числе
+    self-update, он всегда тихий) не выбирают вообще никаких задач, даже
+    checkedonce, если не передать /TASKS= явно. Живым тестом (свежая
+    /VERYSILENT-установка v0.1.0) подтверждено: служба реально вставала
+    DEMAND_START, несмотря на "включённый по умолчанию" чекбокс в .iss —
+    после ЛЮБОЙ перезагрузки или self-update пользователь получал
+    "не удаётся подключиться к службе" без единой подсказки почему
+    (нашлось по скриншоту с реальной машины параллельного тестировщика).
+    Сама служба до set-link+"Включить" ничего не делает и ничего не
+    подключает — держать её DEMAND_START ради опции, которую тихая
+    установка всё равно игнорирует, не стоит риска сломанного приложения
+    после каждого self-update. }
+  StartType := 'auto';
 
   if ServiceExists('{#MyServiceName}') then
   begin
