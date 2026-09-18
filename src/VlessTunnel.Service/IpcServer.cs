@@ -152,13 +152,15 @@ public sealed class IpcServer
                     var coreVersion = await _controller.UpdateCoreAsync(ct);
                     return new IpcResponse { Ok = true, UpdatedToVersion = coreVersion };
                 case IpcCommands.SelfUpdate:
-                    // Как и update-core — пока активен kill-switch, самому
-                    // процессу службы (не xray.exe) выйти в интернет за
-                    // релизом тоже нельзя (живой тест update-core). Сам
-                    // установщик всё равно перезапустит службу с нуля —
-                    // включать туннель обратно после незачем.
-                    await _controller.OffAsync();
-                    var appVersion = await SelfUpdater.CheckAndRunAsync(_log, ct);
+                    // Ревью п.5: выключение переехало ВНУТРЬ SelfUpdater,
+                    // к месту непосредственно перед запуском установщика —
+                    // не сюда, перед скачиванием. Изначальный диагноз
+                    // ("kill-switch блокирует саму службу") не подтвердился
+                    // живым тестом (см. TunnelController.UpdateCoreAsync);
+                    // настоящая причина была в DNS. Сам установщик всё
+                    // равно перезапустит службу с нуля — включать туннель
+                    // обратно после незачем, поэтому колбэк лишь выключает.
+                    var appVersion = await SelfUpdater.CheckAndRunAsync(_log, _controller.OffAsync, ct);
                     return new IpcResponse { Ok = true, UpdatedToVersion = appVersion };
                 default:
                     return new IpcResponse { Ok = false, Error = $"unknown command: {req.Cmd}" };

@@ -362,8 +362,21 @@ public sealed class TunnelManager : IAsyncDisposable
     {
         try
         {
-            if (_xrayProcess is { HasExited: false })
-                _xrayProcess.Kill(entireProcessTree: true);
+            if (_xrayProcess is { HasExited: false } proc)
+            {
+                proc.Kill(entireProcessTree: true);
+                // Kill() асинхронен на уровне ОС — запрашивает завершение,
+                // но не гарантирует, что процесс успел выйти и ОТПУСТИТЬ
+                // СВОЙ EXE-ФАЙЛ к моменту возврата. Найдено живым тестом
+                // (ревью п.5): после переноса выключения ближе к подмене
+                // файлов в update-core немедленный File.Copy поверх
+                // xray.exe стал падать с "используется другим процессом" —
+                // раньше это маскировалось большим запасом времени между
+                // OffAsync() (в самом начале) и подменой файлов (после
+                // скачивания), сама гонка была всегда, просто не проявлялась.
+                if (!proc.WaitForExit(5000))
+                    _log("xray.exe не завершился за 5с после Kill() — возможна гонка при следующей подмене файлов");
+            }
         }
         catch (Exception ex) { _log($"Не удалось завершить xray.exe: {ex.Message}"); }
     }

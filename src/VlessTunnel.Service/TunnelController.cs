@@ -206,16 +206,30 @@ public sealed class TunnelController
     /// файлы на резервную копию и поднимает обратно старое ядро, чтобы
     /// неудачное обновление не оставило пользователя без интернета.
     ///
-    /// Туннель выключается ПЕРЕД скачиванием, не после — найдено живым
-    /// тестом: пока kill-switch активен, самому процессу службы (не
-    /// xray.exe) выйти на github.com тоже нельзя, он для WFP такой же
-    /// "чужой" процесс, как и всё остальное ("Хост не обнаружен" при
-    /// попытке скачать с включённым туннелем).
+    /// Туннель выключается ПЕРЕД подменой файлов, не перед скачиванием —
+    /// пересмотрено (ревью п.5): изначальный диагноз ("пока kill-switch
+    /// активен, самому процессу службы выйти на github.com тоже нельзя")
+    /// не подтвердился живым тестом — permit-фильтр kill-switch'а на
+    /// TUN-интерфейсе не различает процессы, скачивание от имени SYSTEM
+    /// с включённым туннелем и активным kill-switch'ом прошло успешно
+    /// (HTTP 200 на api.github.com). Настоящая причина исходной ошибки
+    /// "Хост не обнаружен" — DNS-баг (TUN-адаптеру не назначался DNS-
+    /// сервер), исправленный раньше в этой же сессии (TunnelManager.
+    /// SetTunDns) и по чистой случайности совпавший по времени с тем
+    /// самым "выключать перед скачиванием", из-за чего и решили, что
+    /// дело в kill-switch. Это важно не ради красоты: если у
+    /// пользователя весь остальной интернет (кроме GitHub) идёт только
+    /// через сам туннель (цензурируемая сеть) — старое поведение оставляло
+    /// его вовсе без интернета на всё время скачивания, а если у него
+    /// сети без туннеля просто нет — access github.com только через
+    /// VPN — старое поведение делало update-core невозможным в принципе.
+    /// Файлы (xray.exe — это EXE-образ РАБОТАЮЩЕГО процесса) всё ещё
+    /// нельзя подменить, пока процесс жив — поэтому выключение осталось,
+    /// просто переехало к месту, где оно физически необходимо.
     /// </summary>
     public async Task<string> UpdateCoreAsync(CancellationToken ct)
     {
         var wasOn = _state == TunnelState.On;
-        if (wasOn) await OffAsync();
 
         var release = await GitHubReleaseClient.GetLatestAsync("XTLS", "Xray-core", ct: ct);
         var asset = release.Assets.FirstOrDefault(a => a.Name == "Xray-windows-64.zip")
@@ -256,6 +270,11 @@ public sealed class TunnelController
             var wintunPath = Path.Combine(xrayDir, "wintun.dll");
             var backupXray = _xrayExePath + ".bak";
             var backupWintun = wintunPath + ".bak";
+
+            // Только теперь, не раньше — xray.exe нельзя перезаписать, пока
+            // его процесс жив (см. комментарий к методу), а до этого места
+            // файл никак не трогали.
+            if (wasOn) await OffAsync();
 
             File.Copy(_xrayExePath, backupXray, overwrite: true);
             if (File.Exists(wintunPath)) File.Copy(wintunPath, backupWintun, overwrite: true);

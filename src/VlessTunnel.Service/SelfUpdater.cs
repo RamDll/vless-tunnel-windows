@@ -31,7 +31,16 @@ public static class SelfUpdater
         "4E84442637C6083B440E6920B79DB36438544A1E", // самоподписанный, installer/trust.ps1
     ];
 
-    public static async Task<string> CheckAndRunAsync(Action<string> log, CancellationToken ct)
+    /// <param name="turnOffTunnelAsync">Вызывается ПЕРЕД запуском
+    /// установщика, не перед скачиванием (ревью п.5 — как и update-core,
+    /// изначальный диагноз "kill-switch блокирует саму службу" не
+    /// подтвердился живым тестом, настоящей причиной была DNS-проблема,
+    /// исправленная раньше в этой же сессии; выключать нужно только
+    /// потому, что установщик остановит и заменит саму службу — не
+    /// раньше). Именно колбэк, а не прямой вызов TunnelController отсюда:
+    /// SelfUpdater — static-класс без своего состояния, а IpcServer уже
+    /// держит единственный экземпляр TunnelController на процесс.</param>
+    public static async Task<string> CheckAndRunAsync(Action<string> log, Func<Task> turnOffTunnelAsync, CancellationToken ct)
     {
         var release = await GitHubReleaseClient.GetLatestAsync("RamDll", "vless-tunnel-windows", ct: ct);
         var exeAsset = release.Assets.FirstOrDefault(a => a.Name == "vless-tunnel-setup.exe")
@@ -84,6 +93,7 @@ public static class SelfUpdater
         log($"self-update: подпись подтверждена WinVerifyTrust, отпечаток в списке доверенных ({cert.Thumbprint})");
 
         CloseRunningTray(log);
+        await turnOffTunnelAsync();
 
         Process.Start(new ProcessStartInfo(exePath, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART") { UseShellExecute = true });
         log($"self-update: установщик {release.TagName} запущен, настройки сохранятся (тихое обновление)");
