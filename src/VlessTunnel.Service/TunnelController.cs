@@ -15,6 +15,7 @@ public sealed class TunnelController
 {
     private readonly string _xrayExePath;
     private readonly string _configPath;
+    private readonly string _linkFilePath;
     private readonly bool _killSwitch;
     private readonly Action<string> _log;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -37,6 +38,31 @@ public sealed class TunnelController
         _configPath = configPath;
         _killSwitch = killSwitch;
         _log = log;
+
+        // Ссылка переживает перезапуск службы (обновление установщиком,
+        // перезагрузку, ручной restart сервиса) — как в Linux-версии
+        // (ETC_DIR/config.json). Найдено живым тестом установщика: без
+        // этого "обновление поверх (настройки на месте)" из критериев
+        // приёмки этапа 6 не выполнялось — set-link держался только в
+        // памяти процесса и терялся при каждом рестарте службы.
+        _linkFilePath = Path.Combine(Path.GetDirectoryName(_configPath) ?? ".", "link.txt");
+        TryLoadPersistedLink();
+    }
+
+    private void TryLoadPersistedLink()
+    {
+        if (!File.Exists(_linkFilePath)) return;
+        try
+        {
+            var saved = File.ReadAllText(_linkFilePath).Trim();
+            if (saved.Length == 0) return;
+            _link = LinkParser.Parse(saved);
+            _log($"set-link (восстановлено): host={_link.Host}");
+        }
+        catch (Exception ex)
+        {
+            _log($"не удалось загрузить сохранённую ссылку из {_linkFilePath}: {ex.Message}");
+        }
     }
 
     public TunnelStatus GetStatus() => new()
@@ -57,6 +83,18 @@ public sealed class TunnelController
         // это только подготовка к следующему on (план, 3.5: set-link — своя команда, не часть on).
         _link = LinkParser.Parse(linkText);
         _log($"set-link: host={_link.Host}");
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_linkFilePath) ?? ".");
+            File.WriteAllText(_linkFilePath, linkText.Trim());
+        }
+        catch (Exception ex)
+        {
+            // Не фатально для текущего сеанса (ссылка уже применена в памяти) —
+            // но переживёт перезапуск только если запись всё же получится.
+            _log($"не удалось сохранить ссылку в {_linkFilePath}: {ex.Message}");
+        }
     }
 
     public async Task OnAsync(CancellationToken ct)

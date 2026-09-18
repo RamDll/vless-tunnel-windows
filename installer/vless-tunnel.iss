@@ -131,7 +131,18 @@ var
   ResultCode: Integer;
   BinPath, StartType: String;
 begin
-  BinPath := '"' + ExpandConstant('{app}\{#MyServiceExeName}') + '" service';
+  { sc.exe ожидает значение binPath= одним аргументом командной строки:
+    внешние кавычки — потому что весь аргумент содержит пробелы, ВНУТРИ
+    него — экранированные кавычки \"...\" вокруг самого пути к exe,
+    потому что путь тоже с пробелами, а после него идёт "service" уже
+    без кавычек (тот же формат, что в документации Microsoft для
+    "sc create ... binPath= \"\"C:\...\App.exe\" -arg\""). Раньше здесь
+    были ДВОЙНЫЕ внешние кавычки (BinPath уже содержал '"'..'"' сам по
+    себе, и снаружи добавлялась ещё одна пара) — sc.exe получал
+    испорченную строку и молча (Exec не проверял ResultCode) ничего не
+    создавал: живым тестом на стенде установщик "успешно" завершался,
+    а службы не было вовсе. }
+  BinPath := '\"' + ExpandConstant('{app}\{#MyServiceExeName}') + '\" service';
   if WizardIsTaskSelected('autostartservice') then
     StartType := 'auto'
   else
@@ -144,6 +155,8 @@ begin
   else
   begin
     Exec(ExpandConstant('{sys}\sc.exe'), 'create {#MyServiceName} binPath= "' + BinPath + '" start= ' + StartType + ' DisplayName= "vless-tunnel"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if ResultCode <> 0 then
+      RaiseException('Не удалось зарегистрировать службу vless-tunnel (sc create, код ' + IntToStr(ResultCode) + ').');
     Exec(ExpandConstant('{sys}\sc.exe'), 'description {#MyServiceName} "VLESS-туннель (WFP kill-switch, TUN)"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 
