@@ -8,19 +8,56 @@ using VlessTunnel.Service;
 //
 // Использование:
 //   VlessTunnel.Service.exe run <файл-со-ссылкой> <путь-к-xray.exe> <рабочая-директория> [--duration N] [--killswitch]
+//   VlessTunnel.Service.exe serve <путь-к-xray.exe> <рабочая-директория> [--killswitch] [--duration N] [--allow-user ИМЯ]
 //   VlessTunnel.Service.exe doctor
 //
-// run поднимает туннель и ждёт Ctrl+C, строки "off" на stdin, либо (если
-// передан --duration) N секунд — затем аккуратно всё снимает и
-// завершается. --duration нужен только для автоматических прогонов на
-// стенде без интерактивного stdin (пайпы с задержкой через PowerShell на
-// SSH ненадёжно передают вход именно в момент задержки, а не сразу же
-// после её истечения) — в реальном сценарии on/off всегда будут приходить
-// по IPC (этап 4), не через эту заглушку.
+// run — старый временный отладочный вход (план, этап 2), поднимает один
+// туннель напрямую и ждёт Ctrl+C/"off"/--duration.
+//
+// serve (план, этап 4, 3.4/3.5) — сервер IPC-канала \\.\pipe\vless-tunnel:
+// принимает on/off/toggle/restart/status/set-link/doctor от VlessTunnel.Cli.
+// --duration тут тоже только для автопрогонов на стенде (сам процесс
+// завершится через N секунд, предварительно сняв туннель, если он поднят).
 //
 // doctor (план, 3.3/3.9) — аварийный поиск и снятие зависших WFP-
 // фильтров kill-switch'а, даже если они остались от процесса, который
 // уже не запущен (например, после сбоя без штатного off).
+
+if (args.Length >= 1 && args[0] == "serve")
+{
+    var xrayPath = args.Length > 1 ? args[1] : throw new ArgumentException("нужен путь к xray.exe");
+    var serveWorkDir = args.Length > 2 && !args[2].StartsWith("--") ? args[2] : Directory.GetCurrentDirectory();
+    Directory.CreateDirectory(serveWorkDir);
+    var serveKillSwitch = args.Contains("--killswitch");
+    var serveDurationIndex = Array.IndexOf(args, "--duration");
+    var serveDuration = serveDurationIndex >= 0 && serveDurationIndex + 1 < args.Length ? int.Parse(args[serveDurationIndex + 1]) : (int?)null;
+    var allowUserIndex = Array.IndexOf(args, "--allow-user");
+    var allowUser = allowUserIndex >= 0 && allowUserIndex + 1 < args.Length ? args[allowUserIndex + 1] : null;
+
+    void ServeLog(string message)
+    {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+        Console.Out.Flush();
+    }
+
+    var controller = new TunnelController(xrayPath, Path.Combine(serveWorkDir, "config-service.json"), serveKillSwitch, ServeLog);
+    var ipc = new IpcServer(controller, ServeLog, allowUser);
+
+    using var serveCts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; serveCts.Cancel(); };
+    if (serveDuration is { } sd) serveCts.CancelAfter(TimeSpan.FromSeconds(sd));
+
+    ServeLog($"IPC-сервер запущен на \\\\.\\pipe\\{VlessTunnel.Core.Ipc.IpcCommands.PipeName}");
+    try { await ipc.RunAsync(serveCts.Token); }
+    catch (OperationCanceledException) { }
+    finally
+    {
+        ServeLog("Останавливаюсь, снимаю туннель если поднят...");
+        await controller.OffAsync();
+        ServeLog("Готово.");
+    }
+    return 0;
+}
 
 if (args.Length >= 1 && args[0] == "doctor")
 {

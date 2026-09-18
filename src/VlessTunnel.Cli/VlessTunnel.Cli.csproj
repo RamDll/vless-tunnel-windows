@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VlessTunnel.Cli</RootNamespace>
+    <!-- План, 3.5: vless-tunnel.exe — клиент IPC, только с сервером
+         разговаривает через именованный канал, сам ничего Windows-
+         специфичного не делает (кроме собственно пути канала). -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../VlessTunnel.Core/VlessTunnel.Core.csproj" />
+  </ItemGroup>
+
+</Project>

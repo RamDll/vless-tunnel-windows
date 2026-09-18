@@ -1,0 +1,62 @@
+namespace VlessTunnel.Core.Ipc;
+
+/// <summary>
+/// Протокол IPC (план, 3.4): именованный канал <c>\\.\pipe\vless-tunnel</c>,
+/// JSON-строки (по одному объекту на строку, NDJSON) — запрос/ответ и
+/// подписка на события в рамках одного и того же соединения. Лежит в Core,
+/// а не в Service/Cli, потому что это общий контракт, который используют
+/// оба конца канала и который не завязан на Windows-специфику самого
+/// транспорта (в отличие от ACL именованного канала — это уже на стороне
+/// сервера, VlessTunnel.Service).
+/// </summary>
+public static class IpcCommands
+{
+    public const string PipeName = "vless-tunnel";
+    public const string On = "on";
+    public const string Off = "off";
+    public const string Toggle = "toggle";
+    public const string Restart = "restart";
+    public const string Status = "status";
+    public const string SetLink = "set-link";
+    public const string Subscribe = "subscribe";
+    public const string Doctor = "doctor";
+}
+
+public sealed class IpcRequest
+{
+    public required string Cmd { get; init; }
+
+    /// <summary>Только для set-link.</summary>
+    public string? Link { get; init; }
+}
+
+public sealed class IpcResponse
+{
+    public required bool Ok { get; init; }
+    public string? Error { get; init; }
+    public TunnelStatus? Status { get; init; }
+    public int? DoctorRemoved { get; init; }
+}
+
+/// <summary>Асинхронное событие подписки (план, 3.4: "трей не опрашивает службу по таймеру").</summary>
+public sealed class IpcEvent
+{
+    public required string Event { get; init; } = "state-changed";
+    public required TunnelStatus Status { get; init; }
+}
+
+public enum TunnelState
+{
+    Off,
+    Starting,
+    On,
+    Stopping,
+    Error,
+}
+
+public sealed class TunnelStatus
+{
+    public required TunnelState State { get; init; }
+    public string? ServerHost { get; init; }
+    public string? Error { get; init; }
+}
