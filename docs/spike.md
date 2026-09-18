@@ -65,7 +65,7 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
    0.0.0.0/1    0.0.0.0        xray0    metric 256
    0.0.0.0/0    192.168.122.1  Ethernet metric 0
    ```
-   Прямое TCP-подключение к самому серверу (130.17.21.198:443) через
+   Прямое TCP-подключение к самому серверу (192.0.2.1:443) через
    физический маршрут — проходит успешно (анти-петлевой маршрут работает).
 
 ## ✅ Дополнительно подтверждено (после ночи): сквозной трафик работает
@@ -83,8 +83,8 @@ Service) — TCP до 1.1.1.1:443 через `0.0.0.0/1` → `xray0` прошё�
 ```
 [Info] proxy/tun: processing from tcp:172.19.0.1:57697 to tcp:1.1.1.1:443
 [Info] app/dispatcher: taking detour [proxy] for [tcp:1.1.1.1:443]
-[Info] transport/internet/splithttp: XHTTP is dialing to tcp:130.17.21.198:443, ... host www.sap.com
-[Info] proxy/vless/outbound: tunneling request to tcp:1.1.1.1:443 via 130.17.21.198:443
+[Info] transport/internet/splithttp: XHTTP is dialing to tcp:192.0.2.1:443, ... host example.com
+[Info] proxy/vless/outbound: tunneling request to tcp:1.1.1.1:443 via 192.0.2.1:443
 ```
 
 Это **настоящая тестовая ссылка** (PQ REALITY + xhttp + vision,
@@ -92,7 +92,7 @@ Service) — TCP до 1.1.1.1:443 через `0.0.0.0/1` → `xray0` прошё�
 «тестовая ссылка с PQ-параметрами работает» тоже подтверждён: `xray`
 успешно продолжает REALITY-хендшейк (видны `XtlsPadding`/
 `XtlsFilterTls` — признаки Vision-протокола) и реально проксирует трафик
-через 130.17.21.198.
+через 192.0.2.1.
 
 Побочные (ложные) гипотезы по пути, отброшенные экспериментом, но
 интересные сами по себе:
@@ -128,7 +128,7 @@ Service) — TCP до 1.1.1.1:443 через `0.0.0.0/1` → `xray0` прошё�
 подтвердил проксирование через настоящий сервер:
 ```
 processing from tcp:[fd00::1]:65446 to tcp:[2606:4700:4700::1111]:443
-tunneling request to tcp:[2606:4700:4700::1111]:443 via 130.17.21.198:443
+tunneling request to tcp:[2606:4700:4700::1111]:443 via 192.0.2.1:443
 ```
 IPv4 и IPv6 работали параллельно на одном запущенном `xray.exe`, без
 конфликтов.
