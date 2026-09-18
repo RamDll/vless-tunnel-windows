@@ -68,3 +68,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\rescue.ps1
 Разработка в процессе — подробный план, найденные и исправленные баги,
 что уже живьём проверено на стенде, а что нет — в
 [`PLAN-windows.md`](PLAN-windows.md).
+
+## Лицензия
+
+[MIT](LICENSE).

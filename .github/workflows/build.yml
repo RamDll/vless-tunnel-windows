@@ -17,6 +17,23 @@
 #                            но хранится тут же для единообразия) — идёт в
 #                            установщик как /DCertThumbprint, деинсталлятор
 #                            снимает доверие именно по нему (план, 3.8).
+#
+# Настоящая (не самоподписанная) подпись через SignPath.io — бесплатно
+# для open source после одобрения заявки на signpath.org, см. PLAN-windows.md.
+# Пока заявка не одобрена и секреты ниже не заведены, шаги SignPath просто
+# пропускаются (сборка падает обратно на самоподписанный .pfx выше). Когда
+# SignPath настроен, self-signed ветка НЕ используется — нет смысла
+# подписывать временным сертификатом файл, который через минуту подпишет
+# нормальный. Секреты/переменные (заводятся после одобрения, значения даёт
+# портал SignPath при создании проекта):
+#   SIGNPATH_API_TOKEN            (secret) — токен роли Submitter
+#   SIGNPATH_ORGANIZATION_ID      (variable) — ID организации в портале
+#   SIGNPATH_PROJECT_SLUG         (variable) — слаг проекта (обычно
+#                                   совпадает с именем репозитория)
+# Также нужно один раз установить приложение "SignPath" из GitHub
+# Marketplace на этот репозиторий (Settings → GitHub Apps) — без него
+# github-action-submit-signing-request не сможет подтвердить источник
+# сборки, это отдельный шаг помимо секретов.
 
 name: build
 
@@ -121,12 +138,13 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
-      - name: Compile installer (unsigned if signing secrets are absent)
+      - name: Compile installer (self-signed fallback if SignPath is not configured, unsigned if neither is)
         shell: pwsh
         env:
           SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
           SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
           CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         run: |
           $isccArgs = @(
             "/DSourceDir=$(Resolve-Path dist)",
@@ -135,7 +153,12 @@ jobs:
           if ($env:CERT_THUMBPRINT) {
             $isccArgs += "/DCertThumbprint=$env:CERT_THUMBPRINT"
           }
-          if ($env:SIGNING_PFX_BASE64 -and $env:SIGNING_PFX_PASSWORD) {
+          # Если SignPath настроен (см. комментарий вверху файла) — он
+          # подпишет готовый .exe ниже настоящим сертификатом, самоподписанная
+          # ветка тут ни к чему (никто не должен доверять trust.ps1
+          # временному сертификату ради файла, который через минуту подпишет
+          # нормальный CA).
+          if ($env:SIGNING_PFX_BASE64 -and $env:SIGNING_PFX_PASSWORD -and -not $env:SIGNPATH_API_TOKEN) {
             $pfxPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
             [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
             # Путь signtool.exe под Windows Kits версионирован по сборке
@@ -175,14 +198,52 @@ jobs:
             # просят вовсе (падало на каждом пуше, не только "без секретов" —
             # см. комментарий в vless-tunnel.iss).
             $isccArgs += "/DSignInstaller=1"
+          } elseif ($env:SIGNPATH_API_TOKEN) {
+            Write-Host "SignPath настроен — установщик соберётся неподписанным здесь и будет подписан шагом SignPath ниже."
           } else {
-            Write-Warning "SIGNING_PFX_BASE64/SIGNING_PFX_PASSWORD не заданы — установщик и .exe соберутся БЕЗ подписи (план, 3.8, ждёт настоящего сертификата)."
+            Write-Warning "Ни SignPath, ни SIGNING_PFX_BASE64/SIGNING_PFX_PASSWORD не заданы — установщик и .exe соберутся БЕЗ подписи (план, 3.8, ждёт настоящего сертификата)."
           }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs installer\vless-tunnel.iss
           if ($env:SIGNING_PFX_BASE64) {
             Remove-Item (Join-Path $env:RUNNER_TEMP 'signing.pfx') -ErrorAction SilentlyContinue
             Remove-Item (Join-Path $env:RUNNER_TEMP 'sign-wrapper.cmd') -ErrorAction SilentlyContinue
           }
+
+      # Три шага ниже — реальная (CA-подписанная) подпись через SignPath.io,
+      # бесплатно для open source (см. комментарий про секреты вверху файла
+      # и PLAN-windows.md). Пропускаются целиком, пока не задан
+      # SIGNPATH_API_TOKEN — секрет появляется только после одобрения заявки
+      # на signpath.org, до этого их физически неоткуда взять.
+      - name: Upload unsigned installer for SignPath
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        id: upload-unsigned-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: vless-tunnel-setup-unsigned
+          path: installer/Output/*.exe
+
+      - name: Submit signing request to SignPath
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          # Две политики (обычно заводятся в портале при создании проекта
+          # под этими же именами) — release только по тегу, чтобы не
+          # расходовать квоту подписей SignPath на каждый пуш в master.
+          signing-policy-slug: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || 'test-signing' }}
+          github-artifact-id: ${{ steps.upload-unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: installer/Output-signed
+
+      - name: Replace installer with the SignPath-signed version
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem installer\Output-signed\*.exe | Select-Object -First 1
+          $target = Get-ChildItem installer\Output\*.exe | Select-Object -First 1
+          Copy-Item $signed.FullName $target.FullName -Force
 
       - name: sha256 for the installer
         shell: pwsh
