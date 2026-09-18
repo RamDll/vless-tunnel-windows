@@ -30,14 +30,32 @@ using VlessTunnel.Service;
 
 if (args.Length >= 1 && args[0] == "service")
 {
-    var programDir = AppContext.BaseDirectory;
-    var svcXrayPath = args.Length > 1 && !args[1].StartsWith("--") ? args[1] : Path.Combine(programDir, "xray.exe");
-    var svcWorkDir = args.Length > 2 && !args[2].StartsWith("--")
-        ? args[2]
-        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "vless-tunnel");
-    var svcKillSwitch = !args.Contains("--no-killswitch"); // kill-switch не опция (план, 3.3) — включён по умолчанию
     var svcAllowUserIndex = Array.IndexOf(args, "--allow-user");
     var svcAllowUser = svcAllowUserIndex >= 0 && svcAllowUserIndex + 1 < args.Length ? args[svcAllowUserIndex + 1] : null;
+    var svcKillSwitch = !args.Contains("--no-killswitch"); // kill-switch не опция (план, 3.3) — включён по умолчанию
+
+    // Позиционные аргументы (xray.exe, рабочая папка) — то, что осталось
+    // ПОСЛЕ вычитания служебных флагов и их значений, а не просто "всё,
+    // что не начинается с --": --allow-user ИМЯ сам занимает позицию
+    // сразу после "service" в реальном вызове установщика (binPath=
+    // "...VlessTunnel.Service.exe" service --allow-user ИМЯ, без явных
+    // xray.exe/рабочей папки) — голая проверка "не начинается с --"
+    // ошибочно принимала бы ИМЯ пользователя за рабочую папку. Не
+    // всплывало раньше, потому что во всех живых тестах этой сессии
+    // xray.exe/рабочая папка передавались явно, ДО --allow-user.
+    var positional = new List<string>();
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (args[i] == "--allow-user") { i++; continue; }
+        if (args[i] == "--no-killswitch") continue;
+        positional.Add(args[i]);
+    }
+
+    var programDir = AppContext.BaseDirectory;
+    var svcXrayPath = positional.Count > 0 ? positional[0] : Path.Combine(programDir, "xray.exe");
+    var svcWorkDir = positional.Count > 1
+        ? positional[1]
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "vless-tunnel");
 
     ServiceBase.Run(new VlessTunnelWindowsService(svcXrayPath, svcWorkDir, svcKillSwitch, svcAllowUser));
     return 0;

@@ -196,6 +196,7 @@ jobs:
           path: |
             installer/Output/*.exe
             installer/Output/*.sha256
+            installer/install.cmd
             installer/trust.ps1
             installer/vless-tunnel.cer
 
@@ -206,5 +207,6 @@ jobs:
           files: |
             installer/Output/*.exe
             installer/Output/*.sha256
+            installer/install.cmd
             installer/trust.ps1
             installer/vless-tunnel.cer

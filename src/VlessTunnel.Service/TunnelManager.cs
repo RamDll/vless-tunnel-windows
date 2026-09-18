@@ -141,6 +141,15 @@ public sealed class TunnelManager : IAsyncDisposable
             _teardown.Add(() => TrySafe(() => RouteManager.RemoveAddress(v6Addr, _tunIfIndex), "удаление TUN IPv6-адреса"));
         }
 
+        // 6'. DNS-серверы для самого TUN-адаптера — без явного назначения
+        // Windows не находит, кого спросить для доменов, роутящихся в TUN
+        // по /1-маршрутам ниже: разрешение имён отваливается целиком, хотя
+        // сырой TCP/IP через туннель работает (не поймать иначе как живым
+        // тестом на реальном клиенте — на стенде эта разница не всплывала).
+        // Явного снятия не требуется — настройка гибнет вместе с адаптером,
+        // когда xray.exe завершается.
+        SetTunDns(winOptions.TunAdapterName, winOptions.DnsServers);
+
         // 7. Маршруты (п.6): хост-маршрут до сервера через физический шлюз
         // (анти-петля), default-покрытие через TUN двумя половинками /1.
         AddHostRoute();
@@ -166,6 +175,35 @@ public sealed class TunnelManager : IAsyncDisposable
             _teardown.Add(() => TrySafe(KillSwitch.Uninstall, "снятие kill-switch"));
             _log("Kill-switch включён (WFP)");
         }
+    }
+
+    /// <summary>
+    /// netsh, не P/Invoke — DNS_INTERFACE_SETTINGS (netioapi.dll) заметно
+    /// сложнее по разметке, чем оправдано для точечного хотфикса; netsh
+    /// здесь тот же общепринятый путь, которым для этого же пользуются
+    /// многие VPN-клиенты под Windows.
+    /// </summary>
+    private void SetTunDns(string adapterName, IReadOnlyList<string> dnsServers)
+    {
+        if (dnsServers.Count == 0) return;
+        RunNetsh($"interface ip set dns name=\"{adapterName}\" static {dnsServers[0]} validate=no");
+        for (var i = 1; i < dnsServers.Count; i++)
+            RunNetsh($"interface ip add dns name=\"{adapterName}\" addr={dnsServers[i]} index={i + 1} validate=no");
+        _log($"DNS TUN-адаптера: {string.Join(", ", dnsServers)}");
+    }
+
+    private void RunNetsh(string arguments)
+    {
+        using var p = Process.Start(new ProcessStartInfo("netsh", arguments)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        });
+        p!.WaitForExit(5000);
+        if (p.ExitCode != 0)
+            _log($"netsh {arguments} -> код {p.ExitCode}: {p.StandardError.ReadToEnd().Trim()}");
     }
 
     private void AddHostRoute()

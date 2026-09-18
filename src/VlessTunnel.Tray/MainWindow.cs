@@ -20,6 +20,8 @@ public sealed class MainWindow : Form
 
     private readonly Panel _onboardingPanel;
     private readonly Panel _configuredPanel;
+    private readonly Panel _connectionErrorPanel;
+    private readonly Label _connectionErrorDetail = new() { AutoSize = false, Width = 320, Height = 60, TextAlign = ContentAlignment.MiddleCenter, ForeColor = SystemColors.GrayText };
     private readonly Label _statusLabel = new() { AutoSize = true, Font = new Font(FontFamily.GenericSansSerif, 13, FontStyle.Bold) };
     private readonly Label _ipLabel = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Button _powerButton = new() { Width = 110, Height = 32 };
@@ -54,8 +56,10 @@ public sealed class MainWindow : Form
 
         _onboardingPanel = BuildOnboardingPanel();
         _configuredPanel = BuildConfiguredPanel();
+        _connectionErrorPanel = BuildConnectionErrorPanel();
         Controls.Add(_onboardingPanel);
         Controls.Add(_configuredPanel);
+        Controls.Add(_connectionErrorPanel);
 
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
 
@@ -92,6 +96,40 @@ public sealed class MainWindow : Form
 
     private static void CenterInPanel(Control child, Control parent) =>
         child.Location = new Point((parent.Width - child.Width) / 2, (parent.Height - child.Height) / 2);
+
+    // ------------------------------------------------------- connection error
+    // Найдено на реальной машине тестировщика: если первый запрос статуса
+    // не удался (служба ещё не поднялась, недоступна, отказано в
+    // доступе...), оба панели (onboarding/configured) так и оставались
+    // Visible=false — пользователь видел полностью белое окно без единой
+    // подсказки, что случилось (ошибка уходила только в скрытый журнал).
+    private Panel BuildConnectionErrorPanel()
+    {
+        var panel = new Panel { Dock = DockStyle.Fill, Visible = false };
+        var box = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            Anchor = AnchorStyles.None,
+        };
+        box.Controls.Add(new Label { Text = "Не удаётся подключиться к службе", AutoSize = true, Font = new Font(FontFamily.GenericSansSerif, 12, FontStyle.Bold), Margin = new Padding(0, 0, 0, 8) });
+        box.Controls.Add(_connectionErrorDetail);
+        var retryButton = new Button { Text = "Повторить", Width = 140, Height = 34, Margin = new Padding(0, 12, 0, 0) };
+        retryButton.Click += async (_, _) => await RefreshStatusAsync();
+        box.Controls.Add(retryButton);
+
+        panel.Controls.Add(box);
+        panel.Resize += (_, _) => CenterInPanel(box, panel);
+        return panel;
+    }
+
+    private void ShowConnectionError(string detail)
+    {
+        _connectionErrorDetail.Text = detail;
+        _onboardingPanel.Visible = false;
+        _configuredPanel.Visible = false;
+        _connectionErrorPanel.Visible = true;
+    }
 
     // ------------------------------------------------------------ configured
     private Panel BuildConfiguredPanel()
@@ -179,12 +217,24 @@ public sealed class MainWindow : Form
         try
         {
             var resp = await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.SetLink, Link = dlg.Link }, TimeSpan.FromSeconds(10));
-            AppendLog(resp.Ok ? "Ссылка применена." : $"Не удалось применить ссылку: {resp.Error}");
+            if (resp.Ok)
+            {
+                AppendLog("Ссылка применена.");
+            }
+            else
+            {
+                // Раньше ошибка уходила только в скрытый журнал — пользователь
+                // видел, что диалог просто "не сработал", без единой подсказки
+                // почему (найдено на реальной машине тестировщика).
+                AppendLog($"Не удалось применить ссылку: {resp.Error}");
+                MessageBox.Show(this, $"Не удалось применить ссылку:\n{resp.Error}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
             await RefreshStatusAsync();
         }
         catch (Exception ex)
         {
             AppendLog($"Не удалось применить ссылку: {ex.Message}");
+            MessageBox.Show(this, $"Не удалось применить ссылку:\n{ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -326,11 +376,20 @@ public sealed class MainWindow : Form
         try
         {
             var resp = await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.Status }, TimeSpan.FromSeconds(10));
-            if (resp is { Ok: true, Status: { } s }) ApplyStatus(s);
+            if (resp is { Ok: true, Status: { } s })
+            {
+                ApplyStatus(s);
+            }
+            else
+            {
+                AppendLog($"Не удалось получить статус: {resp.Error}");
+                ShowConnectionError(resp.Error ?? "служба ответила отказом без подробностей");
+            }
         }
         catch (Exception ex)
         {
             AppendLog($"Не удалось получить статус: {ex.Message}");
+            ShowConnectionError(ex.Message);
         }
     }
 
@@ -339,6 +398,7 @@ public sealed class MainWindow : Form
         void Do()
         {
             _lastStatus = status;
+            _connectionErrorPanel.Visible = false;
             var configured = !string.IsNullOrEmpty(status.ServerHost);
             _onboardingPanel.Visible = !configured;
             _configuredPanel.Visible = configured;

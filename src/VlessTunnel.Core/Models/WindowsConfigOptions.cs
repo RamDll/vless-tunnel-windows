@@ -44,4 +44,12 @@ public sealed class WindowsConfigOptions
     public string TunStack { get; init; } = "gvisor";
 
     public string TunAdapterName { get; init; } = "xray0";
+
+    /// <summary>DNS-серверы для самого TUN-адаптера (не для Xray — те же
+    /// DoH-адреса уже прописаны в dns-секции ConfigBuilder для внутреннего
+    /// резолва Xray). Без этого у Windows буквально некого спросить для
+    /// доменов, ушедших в TUN по /1-маршрутам — раньше не назначались
+    /// вовсе (найдено на реальной машине тестировщика: сырой TCP по IP
+    /// через туннель работал, а разрешение имён отваливалось целиком).</summary>
+    public string[] DnsServers { get; init; } = ["1.1.1.1", "8.8.8.8"];
 }
