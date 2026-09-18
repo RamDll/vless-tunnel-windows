@@ -122,12 +122,25 @@ jobs:
             $pfxPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
             [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
             $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+            # Команда подписи вынесена в отдельный .cmd, а не передана
+            # прямо в /Ssigntool=... одной строкой — PowerShell ломает
+            # передачу нативному процессу аргумента, который сам содержит
+            # пробелы И встроенные кавычки (известная особенность
+            # автоматического экранирования при вызове exe через &): ISCC
+            # получал команду разорванной на несколько токенов и падал с
+            # "You may not specify more than one script filename" — нашлось
+            # только живым прогоном на GitHub Actions, локально на стенде
+            # не воспроизводилось (проверялось поддельным signtool БЕЗ
+            # пробелов внутри). В .cmd кавычки безопасны — их видит cmd.exe,
+            # а не парсер аргументов PowerShell.
+            $signWrapper = Join-Path $env:RUNNER_TEMP 'sign-wrapper.cmd'
             # /td SHA256 /fd SHA256 + метка времени (план, 3.8: "всегда с
             # меткой времени") — без нескольких вариантов сервера меток
             # времени сборка может стать хрупкой к недоступности одного из
             # них, поэтому /tr указывает конкретный сервер явно.
-            $signCmd = "`"$signtool`" sign /f `"$pfxPath`" /p `"$env:SIGNING_PFX_PASSWORD`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `$f"
-            $isccArgs += "/Ssigntool=$signCmd"
+            $wrapperContent = "@echo off`r`n`"$signtool`" sign /f `"$pfxPath`" /p `"$env:SIGNING_PFX_PASSWORD`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %1`r`n"
+            Set-Content -Path $signWrapper -Value $wrapperContent -Encoding ASCII -NoNewline
+            $isccArgs += "/Ssigntool=$signWrapper `$f"
             # SignTool=/SignedUninstaller= в [Setup] — под #if SignInstaller
             # в .iss: без парного /Ssigntool= голая директива валит
             # компиляцию ещё на разборе секции, даже когда подписи не
@@ -138,7 +151,10 @@ jobs:
             Write-Warning "SIGNING_PFX_BASE64/SIGNING_PFX_PASSWORD не заданы — установщик и .exe соберутся БЕЗ подписи (план, 3.8, ждёт настоящего сертификата)."
           }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs installer\vless-tunnel.iss
-          if ($env:SIGNING_PFX_BASE64) { Remove-Item (Join-Path $env:RUNNER_TEMP 'signing.pfx') -ErrorAction SilentlyContinue }
+          if ($env:SIGNING_PFX_BASE64) {
+            Remove-Item (Join-Path $env:RUNNER_TEMP 'signing.pfx') -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $env:RUNNER_TEMP 'sign-wrapper.cmd') -ErrorAction SilentlyContinue
+          }
 
       - name: sha256 for the installer
         shell: pwsh
