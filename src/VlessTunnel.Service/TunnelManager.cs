@@ -83,14 +83,28 @@ public sealed class TunnelManager : IAsyncDisposable
         _log($"config.json записан: {_configPath}");
 
         // 4. Запустить xray.exe под Job Object (умирает вместе со службой).
+        //
+        // ВАЖНО: RedirectStandard{Output,Error}=true создаёт анонимные
+        // pipe'ы с ограниченным буфером ОС. Если их не вычитывать, xray.exe
+        // рано или поздно блокируется на записи в свой же лог — а значит
+        // блокируется и весь дальнейший запуск (включая поднятие TUN).
+        // Это правдоподобно объясняет замеченную на стенде нестабильность
+        // времени появления адаптера (от ~1 с до таймаута в 40 с): раньше
+        // потоки не вычитывались вовсе. BeginOutputReadLine/BeginErrorReadLine
+        // держат pipe'ы свободными постоянно, асинхронно.
         _job = new JobObject("vless-tunnel-xray");
-        _xrayProcess = Process.Start(new ProcessStartInfo(_xrayExePath, $"run -c \"{_configPath}\"")
+        var xrayStart = new ProcessStartInfo(_xrayExePath, $"run -c \"{_configPath}\"")
         {
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-        }) ?? throw new InvalidOperationException($"Не удалось запустить {_xrayExePath}");
+        };
+        _xrayProcess = Process.Start(xrayStart) ?? throw new InvalidOperationException($"Не удалось запустить {_xrayExePath}");
+        _xrayProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) _log($"xray: {e.Data}"); };
+        _xrayProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) _log($"xray[err]: {e.Data}"); };
+        _xrayProcess.BeginOutputReadLine();
+        _xrayProcess.BeginErrorReadLine();
         _job.Assign(_xrayProcess);
         _teardown.Add(() => TryKillXray());
         _log($"xray.exe запущен, pid={_xrayProcess.Id}");
