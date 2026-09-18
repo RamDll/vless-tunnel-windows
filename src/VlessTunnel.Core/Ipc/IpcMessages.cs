@@ -69,5 +69,12 @@ public sealed class TunnelStatus
 {
     public required TunnelState State { get; init; }
     public string? ServerHost { get; init; }
+    public int? ServerPort { get; init; }
+    public string? Network { get; init; }
+    public string? Security { get; init; }
+    public string? CoreVersion { get; init; }
+    public int SocksPort { get; init; } = 10808;
+    public int HttpPort { get; init; } = 10809;
+    public bool AutostartEnabled { get; init; }
     public string? Error { get; init; }
 }

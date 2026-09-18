@@ -30,6 +30,10 @@
     <None Include="..\..\packaging\icons\tray-on.ico" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\packaging\icons\tray-off.ico" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\packaging\icons\tray-unknown.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Тот же файл, что и ApplicationIcon (встраивается в ресурсы exe) —
+         здесь отдельно, потому что MainWindow.Icon читает его как файл
+         рядом с exe во время выполнения, не как встроенный ресурс. -->
+    <None Include="..\..\packaging\icons\vless-tunnel.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -24,6 +24,11 @@ public sealed class TunnelController
     private TunnelState _state = TunnelState.Off;
     private string? _error;
 
+    // Версия Xray "зашита в сборку" (план, 3.7) — то же значение, что
+    // в vm/pinned-versions.txt; отдельного запроса к xray.exe не делаем,
+    // чтобы не платить процессом ради одной строки в окне.
+    public const string XrayVersion = "26.3.27";
+
     public event Action<TunnelStatus>? StatusChanged;
 
     public TunnelController(string xrayExePath, string configPath, bool killSwitch, Action<string> log)
@@ -34,7 +39,17 @@ public sealed class TunnelController
         _log = log;
     }
 
-    public TunnelStatus GetStatus() => new() { State = _state, ServerHost = _link?.Host, Error = _error };
+    public TunnelStatus GetStatus() => new()
+    {
+        State = _state,
+        ServerHost = _link?.Host,
+        ServerPort = _link?.Port,
+        Network = _link?.Network,
+        Security = _link?.Security,
+        CoreVersion = XrayVersion,
+        AutostartEnabled = false, // автозапуск — дело трея (AutostartManager, локальный ярлык), не службы
+        Error = _error,
+    };
 
     public void SetLink(string linkText)
     {
