@@ -228,24 +228,22 @@ public sealed class TunnelController
             var zipPath = Path.Combine(tempDir, asset.Name);
             await GitHubReleaseClient.DownloadToFileAsync(asset.DownloadUrl, zipPath, ct: ct);
 
-            var dgstAsset = release.Assets.FirstOrDefault(a => a.Name == asset.Name + ".dgst");
-            if (dgstAsset is not null)
-            {
-                var dgstPath = Path.Combine(tempDir, dgstAsset.Name);
-                await GitHubReleaseClient.DownloadToFileAsync(dgstAsset.DownloadUrl, dgstPath, ct: ct);
-                var expectedSha = GitHubReleaseClient.ParseSha256FromDgst(await File.ReadAllTextAsync(dgstPath, ct));
-                if (expectedSha is not null)
-                {
-                    var actualSha = await GitHubReleaseClient.Sha256HexAsync(zipPath, ct);
-                    if (!string.Equals(expectedSha, actualSha, StringComparison.OrdinalIgnoreCase))
-                        throw new InvalidOperationException($"sha256 архива Xray не совпал: ожидали {expectedSha}, получили {actualSha}");
-                    _log("update-core: контрольная сумма SHA-256 проверена");
-                }
-            }
-            else
-            {
-                _log("update-core: .dgst недоступен — контрольная сумма не проверена");
-            }
+            // Ревью п.4: раньше отсутствие/неразбираемость .dgst писало
+            // предупреждение в лог и ВСЁ РАВНО подменяло xray.exe/wintun.dll
+            // без единой проверки — единственная защита от подмены архива
+            // (например, компрометации релиза апстрима или MITM без TLS-
+            // пиннинга) была необязательной. Теперь любой из двух случаев —
+            // жёсткий отказ ДО распаковки и подмены файлов, не предупреждение.
+            var dgstAsset = release.Assets.FirstOrDefault(a => a.Name == asset.Name + ".dgst")
+                ?? throw new InvalidOperationException($"В релизе Xray-core {release.TagName} нет {asset.Name}.dgst — контрольную сумму проверить нечем, НЕ подменяю файлы");
+            var dgstPath = Path.Combine(tempDir, dgstAsset.Name);
+            await GitHubReleaseClient.DownloadToFileAsync(dgstAsset.DownloadUrl, dgstPath, ct: ct);
+            var expectedSha = GitHubReleaseClient.ParseSha256FromDgst(await File.ReadAllTextAsync(dgstPath, ct))
+                ?? throw new InvalidOperationException($"Не удалось разобрать {dgstAsset.Name} — контрольную сумму проверить нечем, НЕ подменяю файлы");
+            var actualSha = await GitHubReleaseClient.Sha256HexAsync(zipPath, ct);
+            if (!string.Equals(expectedSha, actualSha, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"sha256 архива Xray не совпал: ожидали {expectedSha}, получили {actualSha}");
+            _log("update-core: контрольная сумма SHA-256 проверена");
 
             var extractDir = Path.Combine(tempDir, "extracted");
             System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, extractDir);
