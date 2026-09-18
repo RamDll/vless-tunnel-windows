@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography.X509Certificates;
 using VlessTunnel.Core;
+using VlessTunnel.Native;
 
 namespace VlessTunnel.Service;
 
@@ -16,9 +17,19 @@ namespace VlessTunnel.Service;
 /// </summary>
 public static class SelfUpdater
 {
-    // Отпечаток сертификата подписи (installer/trust.ps1 сверяет тот же) —
-    // не секрет, это как раз то значение, с которым скачанное сверяется.
-    public const string ExpectedCertThumbprint = "4E84442637C6083B440E6920B79DB36438544A1E";
+    // Отпечатки сертификатов подписи, которым доверяем (installer/trust.ps1
+    // сверяет первый же) — не секрет, это как раз то значение, с которым
+    // скачанное сверяется. Список, а не одна константа (ревью п.3) — при
+    // переходе на нормальную подпись (SignPath, PLAN-windows.md) новый
+    // отпечаток нужно ДОБАВИТЬ сюда одним релизом РАНЬШЕ фактической смены
+    // подписи, иначе self-update у всех уже поставивших программу сломается
+    // на следующем же релизе (self-update скачивает бинарник, подписанный
+    // уже НОВЫМ сертификатом, но сверяет со СТАРЫМ списком из СВОЕЙ, ещё не
+    // обновлённой копии).
+    public static readonly string[] ExpectedCertThumbprints =
+    [
+        "4E84442637C6083B440E6920B79DB36438544A1E", // самоподписанный, installer/trust.ps1
+    ];
 
     public static async Task<string> CheckAndRunAsync(Action<string> log, CancellationToken ct)
     {
@@ -46,19 +57,31 @@ public static class SelfUpdater
             throw new InvalidOperationException($"sha256 установщика не совпал: ожидали {expectedSha}, получили {actualSha} — НЕ запускаю");
         log("self-update: контрольная сумма SHA-256 проверена");
 
+        // Ревью п.3: X509Certificate.CreateFromSignedFile ТОЛЬКО извлекает
+        // сертификат из PE — не проверяет, что подпись действительна и
+        // покрывает файл целиком. Подделать блоб с нужным отпечатком, но
+        // битой/отсутствующей подписью, тривиально; единственной реальной
+        // привязкой оставался sha256 из того же релиза — то есть якоря не
+        // было вовсе. AuthenticodeVerifier.IsValidlySigned (WinVerifyTrust,
+        // VlessTunnel.Native) — то же самое, что делает сам Windows перед
+        // диалогом "издатель не может быть проверен". Проверяем ЭТО первым,
+        // отпечаток сверяем только после успешной проверки подписи.
+        if (!AuthenticodeVerifier.IsValidlySigned(exePath))
+            throw new InvalidOperationException("Подпись установщика недействительна (WinVerifyTrust отклонил файл) — НЕ запускаю");
+
         // X509Certificate.CreateFromSignedFile — устарел (SYSLIB0057) как
         // способ ЗАГРУЗКИ сертификатов из файла (.cer/.pfx), но именно для
         // извлечения Authenticode-подписи ИЗ ПОДПИСАННОГО exe у
         // X509CertificateLoader прямого замену нет — тот читает отдельные
-        // файлы сертификатов, не встроенную подпись PE. Здесь только
-        // извлекается отпечаток для сверки с зашитым значением, не
-        // строится цепочка доверия — обоснованное исключение.
+        // файлы сертификатов, не встроенную подпись PE. Подпись уже
+        // подтверждена WinVerifyTrust выше — здесь только читаем отпечаток
+        // для сверки со списком доверенных.
 #pragma warning disable SYSLIB0057
         using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(exePath));
 #pragma warning restore SYSLIB0057
-        if (!string.Equals(cert.Thumbprint, ExpectedCertThumbprint, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"Отпечаток подписи установщика не совпал: {cert.Thumbprint} (ожидался {ExpectedCertThumbprint}) — НЕ запускаю");
-        log($"self-update: подпись подтверждена (отпечаток {cert.Thumbprint})");
+        if (!ExpectedCertThumbprints.Contains(cert.Thumbprint, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Отпечаток подписи установщика не в списке доверенных: {cert.Thumbprint} — НЕ запускаю");
+        log($"self-update: подпись подтверждена WinVerifyTrust, отпечаток в списке доверенных ({cert.Thumbprint})");
 
         CloseRunningTray(log);
 
