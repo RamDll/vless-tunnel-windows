@@ -7,14 +7,18 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <RootNamespace>VlessTunnel.Service</RootNamespace>
-    <!-- Пока не настоящая Windows-служба (план, этап 2: "через временный
-         отладочный вход") — консольный хост, который делает on/off в
-         рамках одного процесса. Установка как реальной службы — этап 4+. -->
+    <!-- Три режима входа в один exe (план, 3.7): "run"/"serve" — отладочные
+         консольные (этапы 2/4), "service" — настоящая служба Windows под
+         SCM (то, что регистрирует установщик). -->
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../VlessTunnel.Core/VlessTunnel.Core.csproj" />
     <ProjectReference Include="../VlessTunnel.Native/VlessTunnel.Native.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="9.0.0" />
   </ItemGroup>
 
 </Project>

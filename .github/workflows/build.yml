@@ -1,0 +1,154 @@
+# Сборка, тесты, установщик, релиз по тегу (план, раздел 2 и 3.7).
+#
+# Не запускался живьём в этой сессии (нет доступа к Actions отсюда,
+# компиляция установщика требует Inno Setup — отдельный Windows-
+# инструмент) — написан по плану, синтаксис проверен построчно, но
+# нуждается в первом реальном прогоне на GitHub, прежде чем считаться
+# готовым (план, этап 6).
+#
+# Секреты, которые нужно завести в настройках репозитория для подписи
+# (план, 3.8: ".pfx хранится только в секретах GitHub Actions... никогда
+# в репозитории") — сборка и без них проходит, просто без подписи:
+#   SIGNING_PFX_BASE64    — самоподписанный .pfx (Type=CodeSigningCert), в base64
+#   SIGNING_PFX_PASSWORD  — пароль к .pfx
+#   CERT_THUMBPRINT       — отпечаток сертификата (не секрет сам по себе,
+#                            но хранится тут же для единообразия) — идёт в
+#                            установщик как /DCertThumbprint, деинсталлятор
+#                            снимает доверие именно по нему (план, 3.8).
+
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  # Источник истины — vm/pinned-versions.txt (тот же файл, что и для
+  # стенда, план 3.7: "версия Xray и wintun зашиты в сборку, sha256
+  # проверяется в CI") — значения ниже держим синхронными с ним вручную;
+  # шаг "Verify pinned versions" ниже сверяет urls/sha256 оттуда, а не
+  # дублирует их как отдельный источник истины.
+  XRAY_VERSION: "v26.3.27"
+  XRAY_URL: "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip"
+  XRAY_SHA256: "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanity-check pinned xray-core version against vm/pinned-versions.txt
+        shell: pwsh
+        run: |
+          $pinned = Get-Content vm/pinned-versions.txt -Raw
+          if ($pinned -notmatch [regex]::Escape($env:XRAY_SHA256)) {
+            Write-Error "env.XRAY_SHA256 разошёлся с vm/pinned-versions.txt — обновите оба места вместе."
+            exit 1
+          }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore VlessTunnel.slnx
+
+      - name: Test
+        run: dotnet test VlessTunnel.slnx --configuration Release --no-restore
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $ver = $env:GITHUB_REF -replace '^refs/tags/v', ''
+          } else {
+            $ver = "0.0.0-dev.$($env:GITHUB_RUN_NUMBER)"
+          }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Publish Service/Cli/Tray into one shared dist folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Все три — net10.0-windows/win-x64/self-contained, делят
+          # большую часть рантайм-DLL; publish подряд в одну папку без
+          # очистки между ними безопасен (план, 3.7: "один путь к
+          # бинарнику, никаких копий").
+          dotnet publish src/VlessTunnel.Service/VlessTunnel.Service.csproj -c Release -r win-x64 --self-contained true -o dist -p:Version=${{ steps.version.outputs.version }}
+          dotnet publish src/VlessTunnel.Cli/VlessTunnel.Cli.csproj -c Release -r win-x64 --self-contained true -o dist -p:Version=${{ steps.version.outputs.version }}
+          dotnet publish src/VlessTunnel.Tray/VlessTunnel.Tray.csproj -c Release -r win-x64 --self-contained true -o dist -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Download and verify xray-core (sha256 pinned)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:XRAY_URL -OutFile xray.zip
+          $actual = (Get-FileHash xray.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:XRAY_SHA256) {
+            Write-Error "sha256 xray-core не совпал: ожидали $($env:XRAY_SHA256), получили $actual"
+            exit 1
+          }
+          Expand-Archive xray.zip -DestinationPath xray-extracted
+          Copy-Item xray-extracted\xray.exe, xray-extracted\wintun.dll, xray-extracted\geoip.dat, xray-extracted\geosite.dat dist\
+
+      - name: Copy tray icons
+        run: Copy-Item packaging\icons\*.ico dist\
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer (unsigned if signing secrets are absent)
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+          CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT }}
+        run: |
+          $isccArgs = @(
+            "/DSourceDir=$(Resolve-Path dist)",
+            "/DMyAppVersion=${{ steps.version.outputs.version }}"
+          )
+          if ($env:CERT_THUMBPRINT) {
+            $isccArgs += "/DCertThumbprint=$env:CERT_THUMBPRINT"
+          }
+          if ($env:SIGNING_PFX_BASE64 -and $env:SIGNING_PFX_PASSWORD) {
+            $pfxPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+            $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+            # /td SHA256 /fd SHA256 + метка времени (план, 3.8: "всегда с
+            # меткой времени") — без нескольких вариантов сервера меток
+            # времени сборка может стать хрупкой к недоступности одного из
+            # них, поэтому /tr указывает конкретный сервер явно.
+            $signCmd = "`"$signtool`" sign /f `"$pfxPath`" /p `"$env:SIGNING_PFX_PASSWORD`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `$f"
+            $isccArgs += "/Ssigntool=$signCmd"
+          } else {
+            Write-Warning "SIGNING_PFX_BASE64/SIGNING_PFX_PASSWORD не заданы — установщик и .exe соберутся БЕЗ подписи (план, 3.8, ждёт настоящего сертификата)."
+          }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs installer\vless-tunnel.iss
+          if ($env:SIGNING_PFX_BASE64) { Remove-Item (Join-Path $env:RUNNER_TEMP 'signing.pfx') -ErrorAction SilentlyContinue }
+
+      - name: sha256 for the installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem installer\Output\*.exe | Select-Object -First 1
+          (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower() + "  " + $exe.Name | Out-File "$($exe.FullName).sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vless-tunnel-setup
+          path: |
+            installer/Output/*.exe
+            installer/Output/*.sha256
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/Output/*.exe
+            installer/Output/*.sha256

@@ -1,27 +1,47 @@
+using System.ServiceProcess;
 using VlessTunnel.Core;
 using VlessTunnel.Core.Models;
 using VlessTunnel.Native;
 using VlessTunnel.Service;
 
-// Временный отладочный вход (план, этап 2: "on/off через временный
-// отладочный вход" — до полноценного IPC+CLI из этапа 4).
-//
 // Использование:
 //   VlessTunnel.Service.exe run <файл-со-ссылкой> <путь-к-xray.exe> <рабочая-директория> [--duration N] [--killswitch]
 //   VlessTunnel.Service.exe serve <путь-к-xray.exe> <рабочая-директория> [--killswitch] [--duration N] [--allow-user ИМЯ]
+//   VlessTunnel.Service.exe service [xray.exe] [рабочая-директория] [--no-killswitch] [--allow-user ИМЯ]
 //   VlessTunnel.Service.exe doctor
 //
-// run — старый временный отладочный вход (план, этап 2), поднимает один
-// туннель напрямую и ждёт Ctrl+C/"off"/--duration.
+// run — временный отладочный вход (план, этап 2), поднимает один туннель
+// напрямую и ждёт Ctrl+C/"off"/--duration.
 //
-// serve (план, этап 4, 3.4/3.5) — сервер IPC-канала \\.\pipe\vless-tunnel:
-// принимает on/off/toggle/restart/status/set-link/doctor от VlessTunnel.Cli.
-// --duration тут тоже только для автопрогонов на стенде (сам процесс
-// завершится через N секунд, предварительно сняв туннель, если он поднят).
+// serve (план, этап 4, 3.4/3.5) — то же самое, что делает "service" ниже,
+// но консольным процессом, а не под SCM — для ручных прогонов на стенде.
+// Принимает on/off/toggle/restart/status/set-link/doctor от VlessTunnel.Cli.
+//
+// service (план, 3.7 — то, что регистрирует установщик через
+// `sc.exe create`) — тот же IpcServer/TunnelController, но под
+// System.ServiceProcess.ServiceBase: SCM управляет стартом/остановкой,
+// лог идёt в Event Log, а не в консоль (её и нет при запуске под SCM).
+// Пути по умолчанию — рядом с исполняемым файлом (xray.exe) и
+// %ProgramData%\vless-tunnel (план, раздел 2, таблица путей на машине).
 //
 // doctor (план, 3.3/3.9) — аварийный поиск и снятие зависших WFP-
 // фильтров kill-switch'а, даже если они остались от процесса, который
 // уже не запущен (например, после сбоя без штатного off).
+
+if (args.Length >= 1 && args[0] == "service")
+{
+    var programDir = AppContext.BaseDirectory;
+    var svcXrayPath = args.Length > 1 && !args[1].StartsWith("--") ? args[1] : Path.Combine(programDir, "xray.exe");
+    var svcWorkDir = args.Length > 2 && !args[2].StartsWith("--")
+        ? args[2]
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "vless-tunnel");
+    var svcKillSwitch = !args.Contains("--no-killswitch"); // kill-switch не опция (план, 3.3) — включён по умолчанию
+    var svcAllowUserIndex = Array.IndexOf(args, "--allow-user");
+    var svcAllowUser = svcAllowUserIndex >= 0 && svcAllowUserIndex + 1 < args.Length ? args[svcAllowUserIndex + 1] : null;
+
+    ServiceBase.Run(new VlessTunnelWindowsService(svcXrayPath, svcWorkDir, svcKillSwitch, svcAllowUser));
+    return 0;
+}
 
 if (args.Length >= 1 && args[0] == "serve")
 {
