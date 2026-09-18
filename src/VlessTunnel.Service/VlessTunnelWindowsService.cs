@@ -48,6 +48,7 @@ public sealed class VlessTunnelWindowsService : ServiceBase
         }
 
         _controller = new TunnelController(_xrayExePath, Path.Combine(_workDir, "config-service.json"), _killSwitch, Log);
+        _ = _controller.RefreshCoreVersionAsync(); // ревью п.9 — реальная версия установленного xray.exe, не только после update-core
         var ipc = new IpcServer(_controller, Log, _allowUser);
 
         // OnStart обязан вернуться быстро (SCM ждёт ~30с по умолчанию) —

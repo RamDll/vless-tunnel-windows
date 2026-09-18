@@ -82,7 +82,24 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 ; Один путь к бинарникам, без копий (план, 3.7: урок Linux про дубль
 ; /usr/bin и /usr/local/bin) — все три exe и их общий рантайм лежат
 ; рядом в {app}, ничего не копируется ни в System32, ни ещё куда-то.
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb"
+; Ревью п.9: план (3.8) обещает подпись "всех своих .exe", но у
+; wildcard-записи ниже не было флага sign вовсе — ни один файл, включая
+; сами VlessTunnel.*.exe, не подписывался, только сам Setup.exe/
+; unins000.exe. Три СВОИХ exe выделены в отдельные записи с sign (только
+; когда SignInstaller реально включён — тот же переключатель, что и для
+; SignTool= выше, иначе sign без действующего SignTool= сломает
+; компиляцию тем же способом). Не весь рантайм .NET — сотни чужих DLL
+; подписывать незачем и долго, план требует подписи именно своих exe.
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb,{#MyServiceExeName},{#MyCliExeName},{#MyTrayExeName}"
+#if SignInstaller != ""
+Source: "{#SourceDir}\{#MyServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion sign
+Source: "{#SourceDir}\{#MyCliExeName}"; DestDir: "{app}"; Flags: ignoreversion sign
+Source: "{#SourceDir}\{#MyTrayExeName}"; DestDir: "{app}"; Flags: ignoreversion sign
+#else
+Source: "{#SourceDir}\{#MyServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\{#MyCliExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\{#MyTrayExeName}"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 
 [Icons]
 Name: "{group}\vless-tunnel"; Filename: "{app}\{#MyTrayExeName}"

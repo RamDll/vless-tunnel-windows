@@ -196,7 +196,18 @@ jobs:
             # меткой времени") — без нескольких вариантов сервера меток
             # времени сборка может стать хрупкой к недоступности одного из
             # них, поэтому /tr указывает конкретный сервер явно.
-            $wrapperContent = "@echo off`r`n`"$signtool`" sign /f `"$pfxPath`" /p `"$env:SIGNING_PFX_PASSWORD`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %1`r`n"
+            # Ревью п.9: раньше сюда подставлялось РЕАЛЬНОЕ значение пароля
+            # (интерполяция $env:SIGNING_PFX_PASSWORD в саму строку) — пароль
+            # лежал открытым текстом в этом .cmd-файле на диске раннера всё
+            # время сборки (Remove-Item ниже подчищает, но только если
+            # скрипт вообще доходит до конца). %SIGNING_PFX_PASSWORD% —
+            # ссылка на переменную окружения ДЛЯ cmd.exe, подставляется им
+            # самим при запуске, а не нами при записи файла; сам файл
+            # никогда не содержит значения секрета. Дочерний процесс
+            # (signtool.exe через этот .cmd) наследует переменные окружения
+            # от родителя (эта же PowerShell-сессия, где секрет уже есть в
+            # env: блока шага) — передавать явно не нужно.
+            $wrapperContent = "@echo off`r`n`"$signtool`" sign /f `"$pfxPath`" /p `"%SIGNING_PFX_PASSWORD%`" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %1`r`n"
             Set-Content -Path $signWrapper -Value $wrapperContent -Encoding ASCII -NoNewline
             $isccArgs += "/Ssigntool=$signWrapper `$f"
             # SignTool=/SignedUninstaller= в [Setup] — под #if SignInstaller

@@ -16,8 +16,8 @@ namespace VlessTunnel.Service;
 /// включён) kill-switch снимаются в обратном порядке. Kill-switch (WFP,
 /// 3.3) — за флагом <c>killSwitch</c> конструктора, MVP-объём (см.
 /// doc-комментарий <see cref="VlessTunnel.Native.KillSwitch"/>). Назначение
-/// DNS-сервера адаптеру (3.2 п.7) и запрет DNS-утечек — ещё не сделаны,
-/// это следующий шаг этапа 3.
+/// DNS-сервера адаптеру (3.2 п.7, <see cref="SetTunDnsAsync"/>) и запрет
+/// DNS-утечек (kill-switch, п.8) — сделаны.
 /// </summary>
 public sealed class TunnelManager : IAsyncDisposable
 {
@@ -51,6 +51,26 @@ public sealed class TunnelManager : IAsyncDisposable
     private void MarkSelfMutation() => _suppressNetworkChangeUntilUtc = DateTime.UtcNow.AddSeconds(2);
 
     private readonly bool _killSwitch;
+
+    // Ревью п.9: план (3.2) требует перезапуск при смене IP сервера — до
+    // этого единственный резолв был при самом подъёме туннеля (StartAsync,
+    // п.1), при смене A-записи (переезд сервера, DNS-балансировка на его
+    // стороне) туннель молча продолжал стучаться в СТАРЫЙ, уже нерабочий
+    // адрес до ручного рестарта. Не хот-свап IP у живого туннеля — план
+    // явно требует именно перезапуск, что проще и переиспользует уже
+    // проверенный StartAsync/StopAsync, а не отдельный путь "подменить
+    // адрес на лету". Интервал намеренно большой (не секунды/минуты) —
+    // это подстраховка на случай переезда сервера, не поллинг; слишком
+    // частый перерезолв рискует ложно сработать на DNS round-robin
+    // (несколько IP на один хост, каждый ответ — валиден), если сервер
+    // администратора когда-нибудь станет так настроен — известное
+    // ограничение, не защита от него.
+    private static readonly TimeSpan ReresolveInterval = TimeSpan.FromMinutes(10);
+
+    /// <summary>Сигнал (не сам перезапуск — TunnelManager не знает, как
+    /// пересоздать себя же самого под чужим _gate) о том, что адрес
+    /// сервера изменился и туннель нужно перезапустить.</summary>
+    public event Action? ServerAddressChanged;
 
     public TunnelManager(WindowsConfigOptions options, string xrayExePath, string configPath, Action<string> log, bool killSwitch = false)
     {
@@ -175,6 +195,41 @@ public sealed class TunnelManager : IAsyncDisposable
             _teardown.Add(() => TrySafe(KillSwitch.Uninstall, "снятие kill-switch"));
             _log("Kill-switch включён (WFP)");
         }
+
+        // 9. Периодический перерезолв домена сервера (см. ReresolveInterval
+        // выше) — последним, чтобы не стартовать раньше, чем весь туннель
+        // реально поднят.
+        var reresolveCts = new CancellationTokenSource();
+        _teardown.Add(() => reresolveCts.Cancel());
+        _ = PeriodicReresolveLoopAsync(link, reresolveCts.Token);
+    }
+
+    private async Task PeriodicReresolveLoopAsync(ParsedLink link, CancellationToken ct)
+    {
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(ReresolveInterval, ct);
+                IPAddress newIp;
+                try
+                {
+                    newIp = await BootstrapResolver.ResolveAsync(link, ct);
+                }
+                catch (Exception ex)
+                {
+                    _log($"Периодический перерезолв {link.Host} упал (не критично, попробую снова через {ReresolveInterval.TotalMinutes:F0} мин): {ex.Message}");
+                    continue;
+                }
+                if (!newIp.Equals(_serverIp))
+                {
+                    _log($"Перерезолв {link.Host}: {_serverIp} -> {newIp}, требуется перезапуск туннеля");
+                    ServerAddressChanged?.Invoke();
+                    return; // дальше пересоздаст TunnelController — эта копия TunnelManager всё равно скоро остановится
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     /// <summary>

@@ -25,10 +25,16 @@ public sealed class TunnelController
     private TunnelState _state = TunnelState.Off;
     private string? _error;
 
-    // Версия Xray "зашита в сборку" (план, 3.7) — то же значение, что
-    // в vm/pinned-versions.txt; отдельного запроса к xray.exe не делаем,
-    // чтобы не платить процессом ради одной строки в окне.
+    // Ревью п.9: версия "зашитая в сборку" (план, 3.7, то же значение,
+    // что в vm/pinned-versions.txt) была КОНСТАНТОЙ — после update-core
+    // статус и окно продолжали показывать старую версию ядра, хотя файл
+    // на диске уже другой. Теперь это дефолт/фолбэк для случая "ещё ни
+    // разу не спрашивали" — реальная версия читается из самого xray.exe
+    // (RefreshCoreVersionAsync), но КЭШИРУЕТСЯ в поле, не запрашивается
+    // процессом на каждый status — дорого, а версия и не может измениться
+    // сама по себе между обновлениями ядра.
     public const string XrayVersion = "26.3.27";
+    private string _coreVersion = XrayVersion;
 
     public event Action<TunnelStatus>? StatusChanged;
 
@@ -72,10 +78,41 @@ public sealed class TunnelController
         ServerPort = _link?.Port,
         Network = _link?.Network,
         Security = _link?.Security,
-        CoreVersion = XrayVersion,
+        CoreVersion = _coreVersion,
         AutostartEnabled = false, // автозапуск — дело трея (AutostartManager, локальный ярлык), не службы
         Error = _error,
     };
+
+    // Вызывается один раз при первом старте службы (Program.cs) и после
+    // каждого успешного update-core — не на каждый status. "xray.exe
+    // version" печатает первую строку вида "Xray 26.3.27 (Xray,
+    // Penetrates Everything.) ...", версия — второе слово.
+    public async Task RefreshCoreVersionAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(_xrayExePath, "version")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            })!;
+            var stdoutTask = p.StandardOutput.ReadToEndAsync(ct);
+            _ = p.StandardError.ReadToEndAsync(ct); // вычитываем, чтобы не заполнить буфер (ревью п.7, тот же урок)
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+            await p.WaitForExitAsync(cts.Token);
+            var firstLine = (await stdoutTask).Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+            var parts = firstLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2 && parts[0] == "Xray")
+                _coreVersion = parts[1];
+        }
+        catch (Exception ex)
+        {
+            _log($"Не удалось определить версию xray.exe ({ex.Message}) — показываю прежнюю ({_coreVersion})");
+        }
+    }
 
     public void SetLink(string linkText)
     {
@@ -107,6 +144,13 @@ public sealed class TunnelController
 
             SetState(TunnelState.Starting);
             _manager = new TunnelManager(new WindowsConfigOptions { Outbound = new BuildOptions() }, _xrayExePath, _configPath, _log, _killSwitch);
+            // Ревью п.9: план (3.2) требует перезапуск при смене IP сервера —
+            // раньше периодического перерезолва не было вовсе, при смене
+            // A-записи туннель молча продолжал стучаться в старый адрес до
+            // ручного рестарта. TunnelManager сам следит за этим и просто
+            // сигналит о смене — не перезапускает себя сам (он не знает
+            // про _gate/пересоздание себя же самого, это дело контроллера).
+            _manager.ServerAddressChanged += OnServerAddressChanged;
             try
             {
                 await _manager.StartAsync(_link, ct);
@@ -132,6 +176,16 @@ public sealed class TunnelController
         await _gate.WaitAsync();
         try
         {
+            // Ревью п.9: любое явное выключение отменяет отложенный
+            // автовозврат captive portal — раньше таймер включал туннель
+            // обратно даже если пользователь сам выключил его во время
+            // 5-минутного окна (отмена стояла только в самом
+            // CaptivePortalBypassAsync — на ПОВТОРНЫЙ вызов "ещё 5 минут",
+            // но не на обычный off). Здесь, а не только в
+            // CaptivePortalBypassAsync — потому что OffAsync это тот же
+            // путь, которым идёт и любой прямой off от пользователя.
+            _captivePortalCts?.Cancel();
+            _captivePortalCts = null;
             if (_state == TunnelState.Off) return;
             SetState(TunnelState.Stopping);
             await SafeStopAsync();
@@ -176,10 +230,9 @@ public sealed class TunnelController
     /// </summary>
     public async Task CaptivePortalBypassAsync(TimeSpan duration)
     {
-        _captivePortalCts?.Cancel();
-        var cts = new CancellationTokenSource();
-        _captivePortalCts = cts;
-
+        // OffAsync (ниже) сам отменяет любой предыдущий отложенный
+        // автовозврат (ревью п.9) — новый cts создаём ПОСЛЕ, не до, иначе
+        // эта же отмена внутри OffAsync снесла бы его собственный.
         var hadManager = _manager is not null;
         await OffAsync();
         _log(hadManager
@@ -188,6 +241,8 @@ public sealed class TunnelController
 
         if (!hadManager) return; // не было чем блокировать — нечего и восстанавливать
 
+        var cts = new CancellationTokenSource();
+        _captivePortalCts = cts;
         _ = Task.Run(async () =>
         {
             try { await Task.Delay(duration, cts.Token); }
@@ -281,6 +336,7 @@ public sealed class TunnelController
             File.Copy(newXray, _xrayExePath, overwrite: true);
             if (File.Exists(newWintun)) File.Copy(newWintun, wintunPath, overwrite: true);
             _log($"update-core: файлы заменены на {release.TagName}");
+            await RefreshCoreVersionAsync(ct);
 
             if (wasOn)
             {
@@ -298,6 +354,7 @@ public sealed class TunnelController
                     await OffAsync();
                     File.Copy(backupXray, _xrayExePath, overwrite: true);
                     if (File.Exists(backupWintun)) File.Copy(backupWintun, wintunPath, overwrite: true);
+                    await RefreshCoreVersionAsync(CancellationToken.None); // откатили файлы — откатываем и кэш версии
                     await OnAsync(CancellationToken.None);
                     throw new InvalidOperationException($"новое ядро Xray не заработало, откачено на прежнее: {ex.Message}");
                 }
@@ -319,6 +376,19 @@ public sealed class TunnelController
         try { await _manager.StopAsync(); }
         catch (Exception ex) { _log($"Остановка туннеля упала (не критично): {ex.Message}"); }
         _manager = null;
+    }
+
+    // Срабатывает на фоновом Task'е внутри TunnelManager (см. его
+    // PeriodicReresolveLoopAsync) — не на пути, держащем _gate, поэтому
+    // отдельный Task.Run тут безопасен и не самозаблокируется на семафоре.
+    private void OnServerAddressChanged()
+    {
+        _log("Адрес сервера изменился — перезапускаю туннель");
+        _ = Task.Run(async () =>
+        {
+            try { await RestartAsync(CancellationToken.None); }
+            catch (Exception ex) { _log($"Автоматический перезапуск после смены адреса сервера упал: {ex.Message}"); }
+        });
     }
 
     private void SetState(TunnelState state)
