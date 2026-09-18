@@ -134,7 +134,14 @@ public sealed class IpcServer
                     return new IpcResponse { Ok = true, Status = _controller.GetStatus() };
                 case IpcCommands.Doctor:
                     var removed = Native.KillSwitch.Doctor(s => _log($"doctor: {s}"));
-                    return new IpcResponse { Ok = true, DoctorRemoved = removed };
+                    var clock = await VlessTunnel.Core.ClockCheck.CheckAsync(ct: ct);
+                    return new IpcResponse
+                    {
+                        Ok = true,
+                        DoctorRemoved = removed,
+                        DoctorClockSkewSeconds = clock.SkewSeconds,
+                        DoctorClockError = clock.Error,
+                    };
                 case IpcCommands.Test:
                     var results = await TunnelTester.RunAsync();
                     return new IpcResponse { Ok = true, Test = results };

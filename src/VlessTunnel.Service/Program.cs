@@ -86,6 +86,7 @@ if (args.Length >= 1 && args[0] == "doctor")
     {
         var removed = KillSwitch.Doctor(DoctorLog);
         DoctorLog($"Снято фильтров: {removed}");
+        await DoctorClockCheckAsync(DoctorLog);
         return 0;
     }
     catch (Exception ex)
@@ -93,6 +94,25 @@ if (args.Length >= 1 && args[0] == "doctor")
         DoctorLog($"doctor упал: {ex}");
         return 1;
     }
+}
+
+// Общий для standalone "doctor" и IPC-команды (VlessTunnel.Core.ClockCheck) —
+// порог 5 минут: REALITY/TLS обычно допускают секунды-десятки секунд
+// расхождения, но ломаются на минутах, поэтому предупреждаем с запасом,
+// не на первой же секунде дрейфа часов.
+static async Task DoctorClockCheckAsync(Action<string> log)
+{
+    var result = await VlessTunnel.Core.ClockCheck.CheckAsync();
+    if (!result.Ok)
+    {
+        log($"Часы: не удалось проверить ({result.Error})");
+        return;
+    }
+    var skew = result.SkewSeconds!.Value;
+    if (Math.Abs(skew) < 300)
+        log($"Часы: в порядке (расхождение {skew:F0} с)");
+    else
+        log($"Часы: РАСХОДЯТСЯ на {skew:F0} с с сетевым временем — REALITY/TLS может не работать, проверьте дату/время системы");
 }
 
 if (args.Length < 3 || args[0] != "run")

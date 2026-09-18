@@ -135,6 +135,12 @@ if (cmd == IpcCommands.Status)
 else if (cmd == IpcCommands.Doctor)
 {
     Console.WriteLine($"Снято фильтров: {response.DoctorRemoved}");
+    if (response.DoctorClockError is { } clockErr)
+        Console.WriteLine($"Часы: не удалось проверить ({clockErr})");
+    else if (response.DoctorClockSkewSeconds is { } skew)
+        Console.WriteLine(Math.Abs(skew) < 300
+            ? $"Часы: в порядке (расхождение {skew:F0} с)"
+            : $"Часы: РАСХОДЯТСЯ на {skew:F0} с с сетевым временем — REALITY/TLS может не работать, проверьте дату/время системы");
 }
 else if (cmd == IpcCommands.Test)
 {

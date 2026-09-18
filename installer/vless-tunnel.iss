@@ -174,6 +174,16 @@ begin
     Exec(ExpandConstant('{sys}\sc.exe'), 'description {#MyServiceName} "VLESS-туннель (WFP kill-switch, TUN)"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 
+  { Действия при сбое (план, 3.9: "перезапуск через 5 с, 30 с, 60 с") —
+    без этого падение процесса (например, необработанное исключение)
+    оставляет туннель выключенным до ручного вмешательства, а с
+    включённым kill-switch — без интернета вовсе. reset=86400 обнуляет
+    счётчик попыток через сутки без новых падений, чтобы редкие сбои не
+    копились в "3-я и далее попытка" навсегда. Ставится каждый раз
+    (create и config) — sc config его не трогает, а идемпотентный вызов
+    sc failure ничего не портит при повторной установке. }
+  Exec(ExpandConstant('{sys}\sc.exe'), 'failure {#MyServiceName} reset= 86400 actions= restart/5000/restart/30000/restart/60000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
   Exec(ExpandConstant('{sys}\net.exe'), 'start {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 

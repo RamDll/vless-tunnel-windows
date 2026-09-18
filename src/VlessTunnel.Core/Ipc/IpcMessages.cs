@@ -37,6 +37,8 @@ public sealed class IpcResponse
     public string? Error { get; init; }
     public TunnelStatus? Status { get; init; }
     public int? DoctorRemoved { get; init; }
+    public double? DoctorClockSkewSeconds { get; init; }
+    public string? DoctorClockError { get; init; }
     public TestResults? Test { get; init; }
 }
 
