@@ -6,7 +6,7 @@ using VlessTunnel.Service;
 // отладочный вход" — до полноценного IPC+CLI из этапа 4).
 //
 // Использование:
-//   VlessTunnel.Service.exe run <файл-со-ссылкой> <путь-к-xray.exe> <рабочая-директория> [--duration N]
+//   VlessTunnel.Service.exe run <файл-со-ссылкой> <путь-к-xray.exe> <рабочая-директория> [--duration N] [--killswitch]
 //
 // Поднимает туннель и ждёт Ctrl+C, строки "off" на stdin, либо (если
 // передан --duration) N секунд — затем аккуратно всё снимает и
@@ -29,14 +29,19 @@ Directory.CreateDirectory(workDir);
 
 var durationIndex = Array.IndexOf(args, "--duration");
 var durationSeconds = durationIndex >= 0 && durationIndex + 1 < args.Length ? int.Parse(args[durationIndex + 1]) : (int?)null;
+var killSwitch = args.Contains("--killswitch");
 
 var link = LinkParser.Parse(await File.ReadAllTextAsync(linkPath));
 var options = new WindowsConfigOptions { Outbound = new BuildOptions() };
 var configPath = Path.Combine(workDir, "config-service.json");
 
-void Log(string message) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+void Log(string message)
+{
+    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+    Console.Out.Flush(); // на случай падения процесса (например, access violation в P/Invoke) — иначе буферизованный вывод через cmd.exe теряется
+}
 
-var manager = new TunnelManager(options, xrayExePath, configPath, Log);
+var manager = new TunnelManager(options, xrayExePath, configPath, Log, killSwitch);
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 

@@ -12,11 +12,12 @@ namespace VlessTunnel.Service;
 
 /// <summary>
 /// Оркестрация подъёма/снятия туннеля (план, 3.2). Порядок старта и
-/// остановки — строго по плану; создаваемые маршруты и адрес TUN снимаются
-/// в обратном порядке. Kill-switch (WFP, 3.3) и назначение DNS-сервера
-/// адаптеру (3.2 п.7) сюда сознательно НЕ входят — это этап 3, у этапа 2
-/// по плану (раздел 4) более узкий критерий приёмки: on/off, переживание
-/// смены Wi-Fi/кабеля, чистый откат маршрутов после off.
+/// остановки — строго по плану; создаваемые маршруты, адрес TUN и (если
+/// включён) kill-switch снимаются в обратном порядке. Kill-switch (WFP,
+/// 3.3) — за флагом <c>killSwitch</c> конструктора, MVP-объём (см.
+/// doc-комментарий <see cref="VlessTunnel.Native.KillSwitch"/>). Назначение
+/// DNS-сервера адаптеру (3.2 п.7) и запрет DNS-утечек — ещё не сделаны,
+/// это следующий шаг этапа 3.
 /// </summary>
 public sealed class TunnelManager : IAsyncDisposable
 {
@@ -49,12 +50,15 @@ public sealed class TunnelManager : IAsyncDisposable
 
     private void MarkSelfMutation() => _suppressNetworkChangeUntilUtc = DateTime.UtcNow.AddSeconds(2);
 
-    public TunnelManager(WindowsConfigOptions options, string xrayExePath, string configPath, Action<string> log)
+    private readonly bool _killSwitch;
+
+    public TunnelManager(WindowsConfigOptions options, string xrayExePath, string configPath, Action<string> log, bool killSwitch = false)
     {
         _options = options;
         _xrayExePath = xrayExePath;
         _configPath = configPath;
         _log = log;
+        _killSwitch = killSwitch;
     }
 
     public async Task StartAsync(ParsedLink link, CancellationToken ct)
@@ -147,7 +151,15 @@ public sealed class TunnelManager : IAsyncDisposable
         _watcher = new RouteWatcher();
         _watcher.NetworkChanged += OnNetworkChanged;
 
-        // Kill-switch (3.3) — намеренно не здесь, см. doc-комментарий класса.
+        // 8'. Kill-switch (3.3) — последним, чтобы при остановке снимался
+        // первым (строго обратный порядок): пока он есть, "молчаливая
+        // утечка мимо TUN" при падении xray.exe невозможна.
+        if (_killSwitch)
+        {
+            KillSwitch.Install(_xrayExePath, _tunIfIndex, s => _log($"killswitch: {s}"));
+            _teardown.Add(() => TrySafe(KillSwitch.Uninstall, "снятие kill-switch"));
+            _log("Kill-switch включён (WFP)");
+        }
     }
 
     private void AddHostRoute()
@@ -180,7 +192,7 @@ public sealed class TunnelManager : IAsyncDisposable
     /// </summary>
     private const int AlreadyExists = 5010;
 
-    private void WithRetry(Action action, int attempts = 15, int delayMs = 400)
+    private void WithRetry(Action action, int attempts = 30, int delayMs = 500)
     {
         for (var i = 1; ; i++)
         {

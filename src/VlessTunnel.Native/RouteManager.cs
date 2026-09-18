@@ -58,4 +58,18 @@ public static class RouteManager
             throw new Win32Exception((int)err, $"GetBestRoute2({destination}) failed");
         return (bestRoute.NextHop.ToIpAddress(), (int)bestRoute.InterfaceIndex);
     }
+
+    /// <summary>
+    /// LUID интерфейса по его индексу — нужен kill-switch'у (план, 3.3):
+    /// условие FWPM_CONDITION_IP_LOCAL_INTERFACE в WFP матчится по LUID,
+    /// не по индексу (который, как показал живой тест этапа 2, у TUN
+    /// меняется при каждом запуске xray.exe).
+    /// </summary>
+    public static ulong GetInterfaceLuid(int interfaceIndex)
+    {
+        var err = IpHelper.ConvertInterfaceIndexToLuid((uint)interfaceIndex, out var luid);
+        if (err != IpHelper.NO_ERROR)
+            throw new Win32Exception((int)err, $"ConvertInterfaceIndexToLuid(ifIndex={interfaceIndex}) failed");
+        return luid.Value;
+    }
 }
