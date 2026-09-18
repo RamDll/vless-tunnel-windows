@@ -1,4 +1,5 @@
 using System.ServiceProcess;
+using VlessTunnel.Core;
 
 namespace VlessTunnel.Service;
 
@@ -20,6 +21,7 @@ public sealed class VlessTunnelWindowsService : ServiceBase
     private CancellationTokenSource? _cts;
     private Task? _runTask;
     private TunnelController? _controller;
+    private RotatingFileLogger? _fileLogger;
 
     public VlessTunnelWindowsService(string xrayExePath, string workDir, bool killSwitch, string? allowUser)
     {
@@ -34,8 +36,13 @@ public sealed class VlessTunnelWindowsService : ServiceBase
     {
         Directory.CreateDirectory(_workDir);
         _cts = new CancellationTokenSource();
+        _fileLogger = new RotatingFileLogger(Path.Combine(_workDir, "logs"));
 
-        void Log(string message) => EventLog.WriteEntry(message, System.Diagnostics.EventLogEntryType.Information);
+        void Log(string message)
+        {
+            EventLog.WriteEntry(message, System.Diagnostics.EventLogEntryType.Information);
+            try { _fileLogger.WriteLine(message); } catch { /* файловый лог — не критичный путь, Event Log уже записан */ }
+        }
 
         _controller = new TunnelController(_xrayExePath, Path.Combine(_workDir, "config-service.json"), _killSwitch, Log);
         var ipc = new IpcServer(_controller, Log, _allowUser);
@@ -57,5 +64,6 @@ public sealed class VlessTunnelWindowsService : ServiceBase
         catch { /* при остановке службы — best effort, SCM всё равно ждёт ограниченное время */ }
         try { _runTask?.Wait(TimeSpan.FromSeconds(15)); }
         catch { /* не блокируем остановку службы дольше разумного */ }
+        _fileLogger?.Dispose();
     }
 }
