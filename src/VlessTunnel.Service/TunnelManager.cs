@@ -148,7 +148,7 @@ public sealed class TunnelManager : IAsyncDisposable
         // тестом на реальном клиенте — на стенде эта разница не всплывала).
         // Явного снятия не требуется — настройка гибнет вместе с адаптером,
         // когда xray.exe завершается.
-        SetTunDns(winOptions.TunAdapterName, winOptions.DnsServers);
+        await SetTunDnsAsync(winOptions.TunAdapterName, winOptions.DnsServers);
 
         // 7. Маршруты (п.6): хост-маршрут до сервера через физический шлюз
         // (анти-петля), default-покрытие через TUN двумя половинками /1.
@@ -183,16 +183,23 @@ public sealed class TunnelManager : IAsyncDisposable
     /// здесь тот же общепринятый путь, которым для этого же пользуются
     /// многие VPN-клиенты под Windows.
     /// </summary>
-    private void SetTunDns(string adapterName, IReadOnlyList<string> dnsServers)
+    private async Task SetTunDnsAsync(string adapterName, IReadOnlyList<string> dnsServers)
     {
         if (dnsServers.Count == 0) return;
-        RunNetsh($"interface ip set dns name=\"{adapterName}\" static {dnsServers[0]} validate=no");
+        await RunNetshAsync($"interface ip set dns name=\"{adapterName}\" static {dnsServers[0]} validate=no");
         for (var i = 1; i < dnsServers.Count; i++)
-            RunNetsh($"interface ip add dns name=\"{adapterName}\" addr={dnsServers[i]} index={i + 1} validate=no");
+            await RunNetshAsync($"interface ip add dns name=\"{adapterName}\" addr={dnsServers[i]} index={i + 1} validate=no");
         _log($"DNS TUN-адаптера: {string.Join(", ", dnsServers)}");
     }
 
-    private void RunNetsh(string arguments)
+    // Ревью п.7: WaitForExit(5000) при RedirectStandardOutput/Error БЕЗ
+    // вычитывания потоков — классический deadlock-риск (netsh блокируется
+    // на записи в заполненный pipe-буфер, если его никто не читает), тот
+    // же класс бага, что уже ловили на xray.exe. Плюс p.ExitCode дальше
+    // читался БЕЗ проверки, что WaitForExit вообще дождался (мог бросить
+    // InvalidOperationException на процессе, который ещё жив). Читаем
+    // потоки асинхронно ПАРАЛЛЕЛЬНО ожиданию, не после него.
+    private async Task RunNetshAsync(string arguments)
     {
         using var p = Process.Start(new ProcessStartInfo("netsh", arguments)
         {
@@ -200,10 +207,23 @@ public sealed class TunnelManager : IAsyncDisposable
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-        });
-        p!.WaitForExit(5000);
+        })!;
+        var stderrTask = p.StandardError.ReadToEndAsync();
+        var stdoutTask = p.StandardOutput.ReadToEndAsync();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await p.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _log($"netsh {arguments} -> не завершился за 5с, убиваю");
+            try { p.Kill(entireProcessTree: true); } catch { /* best effort */ }
+            return;
+        }
         if (p.ExitCode != 0)
-            _log($"netsh {arguments} -> код {p.ExitCode}: {p.StandardError.ReadToEnd().Trim()}");
+            _log($"netsh {arguments} -> код {p.ExitCode}: {(await stderrTask).Trim()}");
+        _ = stdoutTask; // стандартный вывод netsh не используется, но вычитывается — иначе именно он и переполняется
     }
 
     private void AddHostRoute()
