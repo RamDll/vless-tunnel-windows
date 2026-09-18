@@ -148,6 +148,18 @@ public sealed class IpcServer
                 case IpcCommands.CaptivePortal:
                     await _controller.CaptivePortalBypassAsync(TimeSpan.FromMinutes(5));
                     return new IpcResponse { Ok = true, Status = _controller.GetStatus() };
+                case IpcCommands.UpdateCore:
+                    var coreVersion = await _controller.UpdateCoreAsync(ct);
+                    return new IpcResponse { Ok = true, UpdatedToVersion = coreVersion };
+                case IpcCommands.SelfUpdate:
+                    // Как и update-core — пока активен kill-switch, самому
+                    // процессу службы (не xray.exe) выйти в интернет за
+                    // релизом тоже нельзя (живой тест update-core). Сам
+                    // установщик всё равно перезапустит службу с нуля —
+                    // включать туннель обратно после незачем.
+                    await _controller.OffAsync();
+                    var appVersion = await SelfUpdater.CheckAndRunAsync(_log, ct);
+                    return new IpcResponse { Ok = true, UpdatedToVersion = appVersion };
                 default:
                     return new IpcResponse { Ok = false, Error = $"unknown command: {req.Cmd}" };
             }

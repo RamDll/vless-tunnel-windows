@@ -197,6 +197,105 @@ public sealed class TunnelController
         });
     }
 
+    /// <summary>
+    /// update-core (план, 3.9/3.5) — скачивает последний релиз Xray-core,
+    /// сверяет sha256 с опубликованным .dgst (тот же формат, что уже
+    /// разбирает Linux-версия), подменяет xray.exe/wintun.dll и
+    /// перепроверяет туннель. Если туннель был включён и с новым ядром не
+    /// поднимается или не проходит <see cref="TunnelTester"/> — откатывает
+    /// файлы на резервную копию и поднимает обратно старое ядро, чтобы
+    /// неудачное обновление не оставило пользователя без интернета.
+    ///
+    /// Туннель выключается ПЕРЕД скачиванием, не после — найдено живым
+    /// тестом: пока kill-switch активен, самому процессу службы (не
+    /// xray.exe) выйти на github.com тоже нельзя, он для WFP такой же
+    /// "чужой" процесс, как и всё остальное ("Хост не обнаружен" при
+    /// попытке скачать с включённым туннелем).
+    /// </summary>
+    public async Task<string> UpdateCoreAsync(CancellationToken ct)
+    {
+        var wasOn = _state == TunnelState.On;
+        if (wasOn) await OffAsync();
+
+        var release = await GitHubReleaseClient.GetLatestAsync("XTLS", "Xray-core", ct: ct);
+        var asset = release.Assets.FirstOrDefault(a => a.Name == "Xray-windows-64.zip")
+            ?? throw new InvalidOperationException("В релизе Xray-core не найден Xray-windows-64.zip");
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "vless-tunnel-update-core-" + Guid.NewGuid());
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var zipPath = Path.Combine(tempDir, asset.Name);
+            await GitHubReleaseClient.DownloadToFileAsync(asset.DownloadUrl, zipPath, ct: ct);
+
+            var dgstAsset = release.Assets.FirstOrDefault(a => a.Name == asset.Name + ".dgst");
+            if (dgstAsset is not null)
+            {
+                var dgstPath = Path.Combine(tempDir, dgstAsset.Name);
+                await GitHubReleaseClient.DownloadToFileAsync(dgstAsset.DownloadUrl, dgstPath, ct: ct);
+                var expectedSha = GitHubReleaseClient.ParseSha256FromDgst(await File.ReadAllTextAsync(dgstPath, ct));
+                if (expectedSha is not null)
+                {
+                    var actualSha = await GitHubReleaseClient.Sha256HexAsync(zipPath, ct);
+                    if (!string.Equals(expectedSha, actualSha, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException($"sha256 архива Xray не совпал: ожидали {expectedSha}, получили {actualSha}");
+                    _log("update-core: контрольная сумма SHA-256 проверена");
+                }
+            }
+            else
+            {
+                _log("update-core: .dgst недоступен — контрольная сумма не проверена");
+            }
+
+            var extractDir = Path.Combine(tempDir, "extracted");
+            System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, extractDir);
+            var newXray = Path.Combine(extractDir, "xray.exe");
+            var newWintun = Path.Combine(extractDir, "wintun.dll");
+            if (!File.Exists(newXray))
+                throw new InvalidOperationException("В архиве Xray-windows-64.zip нет xray.exe");
+
+            var xrayDir = Path.GetDirectoryName(_xrayExePath) ?? ".";
+            var wintunPath = Path.Combine(xrayDir, "wintun.dll");
+            var backupXray = _xrayExePath + ".bak";
+            var backupWintun = wintunPath + ".bak";
+
+            File.Copy(_xrayExePath, backupXray, overwrite: true);
+            if (File.Exists(wintunPath)) File.Copy(wintunPath, backupWintun, overwrite: true);
+            File.Copy(newXray, _xrayExePath, overwrite: true);
+            if (File.Exists(newWintun)) File.Copy(newWintun, wintunPath, overwrite: true);
+            _log($"update-core: файлы заменены на {release.TagName}");
+
+            if (wasOn)
+            {
+                try
+                {
+                    await OnAsync(ct);
+                    var results = await TunnelTester.RunAsync();
+                    if (results is not { Http: true, Socks5: true })
+                        throw new InvalidOperationException("новое ядро поднялось, но туннель не проходит проверку (HTTP/SOCKS5)");
+                    _log("update-core: новое ядро проверено, туннель работает");
+                }
+                catch (Exception ex)
+                {
+                    _log($"update-core: новое ядро не заработало ({ex.Message}) — откатываю прежнее");
+                    await OffAsync();
+                    File.Copy(backupXray, _xrayExePath, overwrite: true);
+                    if (File.Exists(backupWintun)) File.Copy(backupWintun, wintunPath, overwrite: true);
+                    await OnAsync(CancellationToken.None);
+                    throw new InvalidOperationException($"новое ядро Xray не заработало, откачено на прежнее: {ex.Message}");
+                }
+            }
+
+            File.Delete(backupXray);
+            if (File.Exists(backupWintun)) File.Delete(backupWintun);
+            return release.TagName;
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* временная папка, не критично */ }
+        }
+    }
+
     private async Task SafeStopAsync()
     {
         if (_manager is null) return;

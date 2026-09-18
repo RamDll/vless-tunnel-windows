@@ -47,7 +47,7 @@ if (cmd == "watch")
     return 0;
 }
 
-var notYetImplemented = new HashSet<string> { "logs", "autostart", "update-core", "ensure", "uninstall" };
+var notYetImplemented = new HashSet<string> { "logs", "autostart", "ensure", "uninstall" };
 if (notYetImplemented.Contains(cmd))
 {
     Console.Error.WriteLine($"\"{cmd}\" ещё не реализовано на сервере (этап 4 покрывает on/off/toggle/restart/status/set-link/doctor).");
@@ -64,6 +64,8 @@ var timeoutMs = cmd switch
     IpcCommands.Doctor => 30_000,
     IpcCommands.Test => 40_000, // 4 проверки по ~6с таймаута каждая, последовательно
     IpcCommands.CaptivePortal => 10_000, // сама пауза — 5 минут, но снятие фильтров быстрое, ответ не ждёт истечения таймера
+    IpcCommands.UpdateCore => 180_000, // скачивание ~35 МБ + возможный полный off/on с проверкой туннеля
+    IpcCommands.SelfUpdate => 120_000, // скачивание установщика (~46 МБ) + проверки, без перезапуска туннеля
     _ => 10_000,
 };
 
@@ -147,6 +149,14 @@ else if (cmd == IpcCommands.CaptivePortal)
 {
     Console.WriteLine("Туннель выключен на 5 минут — пройдите вход на странице портала Wi-Fi, потом туннель включится сам.");
 }
+else if (cmd == IpcCommands.UpdateCore)
+{
+    Console.WriteLine($"Ядро Xray обновлено до {response.UpdatedToVersion}.");
+}
+else if (cmd == IpcCommands.SelfUpdate)
+{
+    Console.WriteLine($"Скачан и проверен установщик {response.UpdatedToVersion}, запущен (настройки сохранятся).");
+}
 else if (cmd == IpcCommands.Test)
 {
     var t = response.Test;
@@ -182,5 +192,6 @@ static void PrintUsage()
           set-link <ссылка> | set-link --stdin
           doctor
           captive-portal
+          update-core | self-update
         """);
 }

@@ -22,6 +22,8 @@ public static class IpcCommands
     public const string Doctor = "doctor";
     public const string Test = "test";
     public const string CaptivePortal = "captive-portal";
+    public const string UpdateCore = "update-core";
+    public const string SelfUpdate = "self-update";
 }
 
 public sealed class IpcRequest
@@ -41,6 +43,7 @@ public sealed class IpcResponse
     public double? DoctorClockSkewSeconds { get; init; }
     public string? DoctorClockError { get; init; }
     public TestResults? Test { get; init; }
+    public string? UpdatedToVersion { get; init; }
 }
 
 /// <summary>Результаты `test` (план, 3.5) — HTTP/SOCKS5/прозрачный TCP/DNS.</summary>
