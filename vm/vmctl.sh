@@ -28,6 +28,7 @@ usage() {
   ip                          управляющий IP виртуалки (сеть vt-mgmt)
   test-ip                     IP виртуалки в тестируемой сети (default) — только для чтения/диагностики, НЕ для SSH
   status                      состояние домена + guest agent + (если есть IP) SSH
+  guest-alive                 код возврата 0/1 — отвечает ли guest agent (без сети)
   ssh [команда...]            SSH внутрь виртуалки (интерактивно без аргументов)
   scp <src> <dst>             копирование через SSH (используйте vt-win10: как хост в пути)
   exec <path> [arg...]        выполнить команду через QEMU guest agent (без сети)
@@ -93,6 +94,15 @@ do_exec() {
   return "$exitcode"
 }
 
+# Ревью стенда п.27: здоровье гостя определяется guest agent'ом (канал
+# независим от сети совсем), а не доступностью SSH — SSH может не
+# отвечать и тогда, когда гость полностью жив (сетевая проблема на
+# управляющем адаптере/хосте), путать эти два состояния и откатывать VM
+# только по недоступности SSH было ошибкой (with-rescue.sh).
+guest_alive() {
+  $VIRSH qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' >/dev/null 2>&1
+}
+
 do_status() {
   echo "domstate: $($VIRSH domstate "$VM_NAME" 2>&1)"
   local ping
@@ -120,6 +130,7 @@ case "$cmd" in
   ip) ip_of ;;
   test-ip) test_ip_of ;;
   status) do_status ;;
+  guest-alive) guest_alive ;;
   ssh) do_ssh "$@" ;;
   scp) [ $# -eq 2 ] || usage; do_scp "$1" "$2" ;;
   exec) [ $# -ge 1 ] || usage; do_exec "$@" ;;

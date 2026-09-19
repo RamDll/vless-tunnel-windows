@@ -93,6 +93,22 @@ Step 'Управляющая сеть vt-mgmt: SSH только на ней' {
     if (-not $mgmtIp) { throw "vt-mgmt адаптер (MAC $mgmtMacWindows) не получил IP за отведённое время" }
     if ($mgmtAdapterName -ne 'vt-mgmt') { Rename-NetAdapter -Name $mgmtAdapterName -NewName 'vt-mgmt' }
 
+    # Ревью стенда, п.26а: DHCP-резервация давала IP, но ЗАВИСЕЛА от
+    # своевременного продления аренды по таймеру Windows — под тяжёлой
+    # нагрузкой внутри гостя (полная пересборка + install/uninstall)
+    # управляющий канал живьём переставал принимать НОВЫЕ SSH-подключения
+    # ("No route to host") после конца теста, хотя SSH-сессия, открытая
+    # ДО этого, всю дорогу работала нормально — похоже на срыв аренды
+    # именно на этом адаптере, ровно там, где rescue.ps1 сознательно не
+    # трогает DHCP (см. комментарий в vm/rescue.ps1). Переводим адаптер
+    # на статику ТЕМ ЖЕ адресом сразу после получения его по DHCP —
+    # резервация в vt-mgmt-network.xml остаётся только для самого первого
+    # запроса при заводе машины, дальше от неё вообще не зависим.
+    $mgmtIfIndex = (Get-NetAdapter -Name 'vt-mgmt').InterfaceIndex
+    Remove-NetIPAddress -InterfaceIndex $mgmtIfIndex -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
+    Set-NetIPInterface -InterfaceIndex $mgmtIfIndex -Dhcp Disabled -ErrorAction SilentlyContinue
+    New-NetIPAddress -InterfaceIndex $mgmtIfIndex -IPAddress $mgmtIp -PrefixLength 24 -ErrorAction Stop | Out-Null
+
     $sshdConfig = 'C:\ProgramData\ssh\sshd_config'
     $lines = Get-Content $sshdConfig
     $lines = $lines | Where-Object { $_ -notmatch '^\s*ListenAddress\s' }
