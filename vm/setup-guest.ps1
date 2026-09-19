@@ -142,6 +142,22 @@ Step 'Копирование rescue.ps1 / run-test.ps1 в C:\dev\bin' {
     Copy-Item "$ToolsDir\run-test.ps1" 'C:\dev\bin\run-test.ps1' -Force
 }
 
+# Стенд, п.3: раннер сценариев (build+install+тест) живёт целиком внутри
+# гостя (vm/guest-build.ps1, vm/guest-run-scenario.ps1) — нужен свой
+# .NET SDK и Inno Setup, не только то, что ставит сам продукт.
+Step '.NET SDK для сборки внутри гостя' {
+    if (Test-Path 'C:\dev\dotnet\dotnet.exe') { return }
+    Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile 'C:\dev\bin\dotnet-install.ps1' -UseBasicParsing
+    & powershell -ExecutionPolicy Bypass -NoProfile -File 'C:\dev\bin\dotnet-install.ps1' -Channel 10.0 -InstallDir 'C:\dev\dotnet'
+}
+
+Step 'Inno Setup для сборки установщика внутри гостя' {
+    if (Test-Path 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe') { return }
+    $isSetup = Join-Path $env:TEMP 'innosetup-install.exe'
+    Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/6/innosetup-6.7.3.exe' -OutFile $isSetup -UseBasicParsing
+    Start-Process $isSetup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+}
+
 Write-Host 'RESULT: SETUP-GUEST DONE'
 Stop-Transcript
 Stop-Computer -Force

@@ -51,6 +51,34 @@ function Add-Step {
     })
 }
 
+# Стенд, п.3: сценарии, которые говорят с самой службой (on/off/doctor/
+# status), делают это НАПРЯМУЮ по именованному каналу (протокол —
+# VlessTunnel.Core.Ipc.IpcCommands: NDJSON, {"Cmd":...}/{"Ok":...}), а не
+# через VlessTunnel.Cli.exe — тот форматирует ответ в текст для человека
+# (Console.WriteLine), а сверять вердикт нужно по структуре, не по тексту.
+function Invoke-VtIpc {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cmd,
+        [string]$Link = $null,
+        [int]$TimeoutMs = 90000
+    )
+    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'vless-tunnel', [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+    try {
+        $pipe.Connect(5000)
+        $writer = New-Object System.IO.StreamWriter($pipe)
+        $writer.AutoFlush = $true
+        $reader = New-Object System.IO.StreamReader($pipe)
+        $req = [ordered]@{ Cmd = $Cmd }
+        if ($Link) { $req.Link = $Link }
+        $writer.WriteLine(($req | ConvertTo-Json -Compress))
+        $task = $reader.ReadLineAsync()
+        if (-not $task.Wait($TimeoutMs)) { throw "IPC timeout after ${TimeoutMs}ms for Cmd=$Cmd" }
+        return $task.Result | ConvertFrom-Json
+    } finally {
+        $pipe.Dispose()
+    }
+}
+
 Start-Transcript -Path $log
 $overall = 'ERROR'
 $scriptError = $null

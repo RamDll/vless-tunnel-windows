@@ -4,15 +4,16 @@
 # этот скрипт. Цепочка спасения (шаги пронумерованы как в плане):
 #   1. снимок pre-<тест> (старые pre-* удаляются, оставляем последние 3)
 #   2. задача vt-rescue на +10 минут (страховка, если сам скрипт зависнет)
-#   3. run-test.ps1 через SSH под timeout, лог копируется в logs/vm/
-#   3'. timeout сработал (сценарий завис) -> сразу считаем стенд сломанным,
+#   3. синхронизация исходников в C:\dev\src (стенд, п.3 — сборка внутри гостя)
+#   4. run-test.ps1 через SSH под timeout, лог копируется в logs/vm/
+#   4'. timeout сработал (сценарий завис) -> сразу считаем стенд сломанным,
 #       минуя проверку связи (стенд, п.4: "откат после падения ИЛИ по
 #       таймауту" — зависший процесс на госте не гарантирует, что его
 #       finally/rescue.ps1 вообще выполнился, даже если сеть на вид цела)
-#   4. проверка: SSH отвечает и есть интернет без туннеля
-#   5. нет связи (или был таймаут) -> rescue.ps1 через guest agent (без сети), ждать до 60с
-#   6. guest agent не помог -> откат на pre-снимок, тест = BROKE_VM
-#   7. успех -> снять задачу vt-rescue
+#   5. проверка: SSH отвечает и есть интернет без туннеля
+#   6. нет связи (или был таймаут) -> rescue.ps1 через guest agent (без сети), ждать до 60с
+#   7. guest agent не помог -> откат на pre-снимок, тест = BROKE_VM
+#   8. успех -> снять задачу vt-rescue
 set -uo pipefail  # без -e: после сбоя должны выполниться шаги восстановления, не упасть
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,10 +60,23 @@ log "Ставлю задачу vt-rescue (страховка на случай, 
   /TR 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\bin\rescue.ps1' \
   /RL HIGHEST /F >/dev/null 2>&1
 
-# --- 3. копируем тест, запускаем run-test.ps1 через SSH под timeout ---
-REMOTE_SCRIPT="C:\\dev\\bin\\test-${TEST_NAME}.ps1"
+# --- 3. синхронизируем исходники в C:\dev\src (стенд, п.3: сборка живёт
+# внутри гостя — guest-build.ps1 берёт код отсюда, хосту незачем гонять
+# готовые бинарники через scp). git archive -> tar по SSH, без .git и
+# рабочих артефактов (bin/obj), быстро (доли секунды на этот репозиторий).
 HOSTLOG="$LOGDIR/${TEST_NAME}-$(date +%Y%m%d-%H%M%S).host.log"
 { echo "test: $TEST_NAME"; echo "local_script: $LOCAL_SCRIPT"; echo "snapshot: $SNAP"; } > "$HOSTLOG"
+
+log "Синхронизирую исходники в C:\\dev\\src"
+"$VMCTL" ssh "Remove-Item 'C:\\dev\\src' -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path 'C:\\dev\\src' | Out-Null" >>"$HOSTLOG" 2>&1
+if ! git -C "$REPO_ROOT" archive --format=tar HEAD | "$VMCTL" ssh "tar -xf - -C C:\\dev\\src" >>"$HOSTLOG" 2>&1; then
+  log "Синхронизация исходников не удалась — тест не запускаю"
+  echo "RESULT: SYNC_FAILED" >> "$HOSTLOG"
+  exit 1
+fi
+
+# --- 4. копируем тест, запускаем run-test.ps1 через SSH под timeout ---
+REMOTE_SCRIPT="C:\\dev\\bin\\test-${TEST_NAME}.ps1"
 
 SSH_OK=0
 TIMED_OUT=0
@@ -109,7 +123,7 @@ if [ -n "$REMOTE_JSON_PATH" ] && "$VMCTL" scp "vt-win10:$REMOTE_JSON_PATH" "$LOG
 fi
 log "Вердикт теста (из JSON-отчёта): $TEST_VERDICT"
 
-# --- 4. проверка связи ---
+# --- 5. проверка связи ---
 if [ "$TIMED_OUT" = "1" ]; then
   # Стенд, п.4: таймаут -> сразу откат, без попытки "подлатать" через
   # guest agent. Зависший на госте процесс не гарантирует, что его
@@ -124,7 +138,7 @@ if [ "$TIMED_OUT" = "1" ]; then
 elif [ "$SSH_OK" = "1" ] && check_net; then
   log "Связь в порядке."
 else
-  # --- 5. нет связи -> rescue.ps1 через guest agent (без сети) ---
+  # --- 6. нет связи -> rescue.ps1 через guest agent (без сети) ---
   log "Связи нет — запускаю rescue.ps1 через guest agent"
   "$VMCTL" rescue >>"$HOSTLOG" 2>&1
 
@@ -137,7 +151,7 @@ else
   if [ "$RECOVERED" = "1" ]; then
     log "guest agent восстановил связь."
   else
-    # --- 6. откат к pre-снимку ---
+    # --- 7. откат к pre-снимку ---
     log "guest agent не помог — откатываюсь на $SNAP"
     sudo virsh snapshot-revert "$VM_NAME" "$SNAP" --running 2>>"$HOSTLOG" \
       || sudo virsh snapshot-revert "$VM_NAME" "$SNAP" 2>>"$HOSTLOG"
@@ -147,7 +161,7 @@ else
   fi
 fi
 
-# --- 7. успех -> снять задачу vt-rescue ---
+# --- 8. успех -> снять задачу vt-rescue ---
 "$VMCTL" exec 'schtasks.exe' /Delete /TN vt-rescue /F >/dev/null 2>&1
 echo "RESULT: DONE, test_verdict=$TEST_VERDICT" >> "$HOSTLOG"
 log "Готово (машина цела). Вердикт теста: $TEST_VERDICT. Лог: $HOSTLOG"
