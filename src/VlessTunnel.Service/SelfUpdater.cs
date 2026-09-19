@@ -109,7 +109,13 @@ public static class SelfUpdater
     // автозапуском службы несколько раз подряд молча ничего не делал,
     // пока трей был открыт. Закрываем его тут сами, а не полагаемся на
     // RestartManager внутри установщика.
-    private static void CloseRunningTray(Action<string> log)
+    //
+    // Ревью п.23: та же проблема (файл трея занят, {app} не удаляется
+    // целиком, иконка висит с мёртвой службой) есть у обычного удаления
+    // через мастер — public, чтобы Program.cs ("close-tray") звал ЭТОТ ЖЕ
+    // метод из [Code] секции vless-tunnel.iss, а не заводил вторую,
+    // отдельно эволюционирующую реализацию закрытия трея в Pascal.
+    public static void CloseRunningTray(Action<string> log)
     {
         foreach (var proc in Process.GetProcessesByName("VlessTunnel.Tray"))
         {

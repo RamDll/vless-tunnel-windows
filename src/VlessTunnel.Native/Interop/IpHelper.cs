@@ -59,6 +59,16 @@ internal static class IpHelper
     [DllImport("iphlpapi.dll")]
     internal static extern uint ConvertInterfaceIndexToLuid(uint interfaceIndex, out NET_LUID interfaceLuid);
 
+    // Ревью п.23: перечисление ВСЕЙ таблицы маршрутов для doctor'а (снятие
+    // маршрутов по метке OwnRouteProtocol, тот же принцип, что уже
+    // применяет KillSwitch.Doctor к WFP-фильтрам). AF_UNSPEC=0 — оба
+    // семейства адресов сразу, MIB_IPFORWARD_TABLE2 отдаёт единый список.
+    [DllImport("iphlpapi.dll")]
+    internal static extern uint GetIpForwardTable2(ushort addressFamily, out nint table);
+
+    [DllImport("iphlpapi.dll")]
+    internal static extern void FreeMibTable(nint memory);
+
     // Ревью п.22: метрика интерфейса — единственный ЧЕСТНО новый P/Invoke
     // (в отличие от GetBestRoute2 выше, у которого нужный параметр interfaceIndex
     // уже был объявлен, просто не использовался). Row передаётся по ссылке:

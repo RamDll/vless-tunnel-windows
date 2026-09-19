@@ -136,7 +136,7 @@ if (cmd == IpcCommands.Status)
 }
 else if (cmd == IpcCommands.Doctor)
 {
-    Console.WriteLine($"Снято фильтров: {response.DoctorRemoved}");
+    Console.WriteLine($"Снято фильтров: {response.DoctorRemoved}, маршрутов: {response.DoctorRoutesRemoved}");
     if (response.DoctorClockError is { } clockErr)
         Console.WriteLine($"Часы: не удалось проверить ({clockErr})");
     else if (response.DoctorClockSkewSeconds is { } skew)

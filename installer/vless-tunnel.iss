@@ -398,15 +398,58 @@ end;
 // Ревью п.6: doctor теперь строго ПОСЛЕ гарантированной остановки службы
 // (WaitForServiceStopped), не декларативным списком [UninstallRun], где
 // порядок "doctor -> sc stop" снимал WFP-фильтры у ещё живой службы.
+//
+// Ревью п.23: раньше туннель сворачивался ПОБОЧНЫМ эффектом sc stop
+// (OnStop -> OffAsync внутри службы) — работает, только пока служба
+// успевает уложиться в таймаут SCM (по умолчанию у Windows он свой,
+// не наш WaitForServiceStopped ниже: SCM может решить, что служба
+// зависла, и убить процесс, так и не дав OnStop доработать до конца).
+// Теперь туннель гасится ЯВНО, штатным путём (VlessTunnel.Cli.exe off,
+// с его собственным IPC-таймаутом), пока служба заведомо жива и отвечает
+// по каналу — до какого-либо sc stop. Ошибка здесь не фатальна (служба
+// уже могла быть мертва) — только в лог.
 procedure StopAndCleanupServiceForUninstall;
 var
   ResultCode: Integer;
+  StoppedInTime: Boolean;
 begin
   if ServiceExists('{#MyServiceName}') then
   begin
+    Exec(ExpandConstant('{app}\{#MyCliExeName}'), 'off', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Log('StopAndCleanupServiceForUninstall: "VlessTunnel.Cli.exe off" -> код ' + IntToStr(ResultCode));
+
+    // Тем же способом, что использует self-update (SelfUpdater.
+    // CloseRunningTray, теперь public специально ради этого) — без этого
+    // занятый файл трея не даёт снести папку установки целиком, а иконка
+    // остаётся висеть с уже мёртвой службой. Обёрнуто в отдельную команду
+    // службы ("close-tray"), а не переписано заново на Pascal, чтобы не
+    // завести вторую, отдельно расходящуюся реализацию того же закрытия.
+    // (Комментарий нарочно избегает фигурных скобок вокруг имён констант
+    // вроде app/sys — ISPP раскрывает такие ссылки даже внутри
+    // { }-комментариев, см. ревью п.1 выше по файлу; на всякий случай тот
+    // же принцип соблюдён и здесь, хотя это уже однострочный //.)
+    Exec(ExpandConstant('{app}\{#MyServiceExeName}'), 'close-tray', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
     Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    WaitForServiceStopped('{#MyServiceName}', 30000); // best-effort при удалении — не прерываем деинсталляцию по таймауту
+    StoppedInTime := WaitForServiceStopped('{#MyServiceName}', 30000);
+    if not StoppedInTime then
+    begin
+      Log('StopAndCleanupServiceForUninstall: служба vless-tunnel не остановилась за 30с после sc stop');
+      if not UninstallSilent() then
+        MsgBox(
+          'Служба vless-tunnel не остановилась за отведённое время.' + #13#10 + #13#10 +
+          'Удаление продолжится (маршруты и WFP-фильтры будут сняты принудительно), ' +
+          'но при следующей возможности проверьте, что процессы VlessTunnel.Service.exe ' +
+          'и xray.exe действительно завершились.',
+          mbError, MB_OK);
+    end;
   end;
+  // doctor снимает не только WFP-фильтры, но и НАШИ маршруты по метке
+  // OwnRouteProtocol (ревью п.23; план, 3.7: удаление снимает "службу,
+  // маршруты и WFP-фильтры") — перебором живой таблицы маршрутов, не по
+  // памяти процесса, поэтому снимет их, даже если sc stop выше не
+  // уложился в таймаут (зависшая служба всё ещё может держать
+  // хост-маршрут).
   Exec(ExpandConstant('{app}\{#MyServiceExeName}'), 'doctor', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;

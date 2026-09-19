@@ -96,9 +96,9 @@ public sealed class TunnelController
         // сам полезет за doctor.
         try
         {
-            var removed = Native.KillSwitch.Doctor(s => _log($"doctor (старт службы): {s}"));
-            if (removed > 0)
-                _log($"Старт службы: снято {removed} осиротевших WFP-фильтров (желаемое состояние — выключено)");
+            var result = Native.NetworkDoctor.Run(s => _log($"doctor (старт службы): {s}"));
+            if (result.FiltersRemoved > 0 || result.RoutesRemoved > 0)
+                _log($"Старт службы: снято {result.FiltersRemoved} осиротевших WFP-фильтров и {result.RoutesRemoved} маршрутов (желаемое состояние — выключено)");
         }
         catch (Exception ex)
         {

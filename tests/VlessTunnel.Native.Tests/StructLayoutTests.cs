@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using VlessTunnel.Native.Interop;
+using VlessTunnel.Native;
 using Xunit;
 
 namespace VlessTunnel.Native.Tests;
@@ -98,6 +99,20 @@ public sealed class StructLayoutTests
         Assert.Equal(166, Offset(nameof(MIB_IPINTERFACE_ROW.DisableDefaultRoutes)));
 
         static int Offset(string field) => Marshal.OffsetOf<MIB_IPINTERFACE_ROW>(field).ToInt32();
+    }
+
+    // Ревью п.23: смоук-тест реального вызова GetIpForwardTable2/
+    // Marshal.PtrToStructure по вычисленным вручную смещениям (RouteManager.
+    // ForwardTableHeaderSize=8) — на CI-машине без наших маршрутов ничего
+    // не должно найтись и не должно упасть (AccessViolation при неверном
+    // смещении заголовка таблицы был бы вероятным симптомом ошибки).
+    // Полноценная проверка (маршрут реально снимается) — только живым
+    // тестом на стенде, см. PLAN-windows.md, ревью п.23.
+    [Fact]
+    public void RemoveOwnRoutes_does_not_throw_and_finds_nothing_foreign()
+    {
+        var removed = RouteManager.RemoveOwnRoutes();
+        Assert.Equal(0, removed);
     }
 
     [Theory]

@@ -9,6 +9,7 @@ using VlessTunnel.Service;
 //   VlessTunnel.Service.exe serve <путь-к-xray.exe> <рабочая-директория> [--killswitch] [--duration N] [--allow-user ИМЯ]
 //   VlessTunnel.Service.exe service [xray.exe] [рабочая-директория] [--no-killswitch] [--allow-user ИМЯ]
 //   VlessTunnel.Service.exe doctor
+//   VlessTunnel.Service.exe close-tray
 //
 // run — временный отладочный вход (план, этап 2), поднимает один туннель
 // напрямую и ждёт Ctrl+C/"off"/--duration.
@@ -97,13 +98,24 @@ if (args.Length >= 1 && args[0] == "serve")
     return 0;
 }
 
+// close-tray (ревью п.23) — закрыть VlessTunnel.Tray.exe тем же способом,
+// что self-update (SelfUpdater.CloseRunningTray): вызывается установщиком
+// из [Code] ПЕРЕД sc stop/удалением файлов, иначе занятый файл трея не
+// даёт снести {app} целиком, а иконка остаётся висеть с мёртвой службой.
+if (args.Length >= 1 && args[0] == "close-tray")
+{
+    void CloseTrayLog(string message) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+    SelfUpdater.CloseRunningTray(CloseTrayLog);
+    return 0;
+}
+
 if (args.Length >= 1 && args[0] == "doctor")
 {
     void DoctorLog(string message) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
     try
     {
-        var removed = KillSwitch.Doctor(DoctorLog);
-        DoctorLog($"Снято фильтров: {removed}");
+        var result = NetworkDoctor.Run(DoctorLog);
+        DoctorLog($"Снято фильтров: {result.FiltersRemoved}, маршрутов: {result.RoutesRemoved}");
         await DoctorClockCheckAsync(DoctorLog);
         return 0;
     }

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Net;
+using System.Runtime.InteropServices;
 using VlessTunnel.Native.Interop;
 
 namespace VlessTunnel.Native;
@@ -103,6 +104,56 @@ public static class RouteManager
         if (err != IpHelper.NO_ERROR)
             throw new Win32Exception((int)err, $"GetIpInterfaceEntry(ifIndex={interfaceIndex}) failed");
         return row.Metric;
+    }
+
+    // MIB_IPFORWARD_TABLE2 (netioapi.h): ULONG NumEntries, затем
+    // MIB_IPFORWARD_ROW2 Table[ANY_SIZE]. NumEntries — 4 байта, но первое
+    // поле строки (NET_LUID, union с ULONGLONG) требует выравнивания 8 —
+    // на x64 компилятор вставляет 4 байта паддинга ПЕРЕД массивом, то есть
+    // Table[0] начинается с offset 8, не 4. Тот же x64-only подход, что и
+    // во всех остальных структурах этого файла (MIB_IPFORWARD_ROW2 —
+    // 104 байта, засвидетельствовано StructLayoutTests).
+    private const int ForwardTableHeaderSize = 8;
+
+    /// <summary>
+    /// Ревью п.23: снятие ВСЕХ маршрутов с нашей меткой
+    /// <see cref="MIB_IPFORWARD_ROW2.OwnRouteProtocol"/> — перечисляет
+    /// живую таблицу маршрутов целиком (GetIpForwardTable2), не полагаясь
+    /// на память процесса, тот же принцип, что уже применяет
+    /// <see cref="KillSwitch.Doctor"/> к WFP-фильтрам. Нужен doctor'у:
+    /// без этого после сбойного сценария (служба зависла/убита, off не
+    /// выполнился) хост-маршрут до сервера остаётся в таблице маршрутов
+    /// навсегда, а после удаления программы снять его уже нечем.
+    /// </summary>
+    public static int RemoveOwnRoutes(Action<string>? trace = null)
+    {
+        void Trace(string s) => trace?.Invoke(s);
+
+        const ushort AF_UNSPEC = 0;
+        var err = IpHelper.GetIpForwardTable2(AF_UNSPEC, out var table);
+        if (err != IpHelper.NO_ERROR)
+            throw new Win32Exception((int)err, "GetIpForwardTable2 failed");
+        try
+        {
+            var numEntries = (uint)Marshal.ReadInt32(table);
+            var rowSize = Marshal.SizeOf<MIB_IPFORWARD_ROW2>();
+            Trace($"RemoveOwnRoutes: enumerated {numEntries} routes total");
+            var removed = 0;
+            for (var i = 0; i < numEntries; i++)
+            {
+                var rowPtr = table + ForwardTableHeaderSize + i * rowSize;
+                var row = Marshal.PtrToStructure<MIB_IPFORWARD_ROW2>(rowPtr);
+                if (row.Protocol != MIB_IPFORWARD_ROW2.OwnRouteProtocol) continue;
+                var delErr = IpHelper.DeleteIpForwardEntry2(ref row);
+                Trace($"RemoveOwnRoutes: route ifIndex={row.InterfaceIndex} prefixLen={row.DestinationPrefix.PrefixLength} delete=0x{delErr:X}");
+                if (delErr == IpHelper.NO_ERROR) removed++;
+            }
+            return removed;
+        }
+        finally
+        {
+            IpHelper.FreeMibTable(table);
+        }
     }
 
     /// <summary>
