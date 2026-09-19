@@ -30,7 +30,17 @@ LOCAL_SCRIPT="$2"
 
 log() { echo "[with-rescue:$TEST_NAME] $*" >&2; }
 check_net() {
-  "$VMCTL" ssh "curl.exe -s --max-time 10 -o NUL -w '%{http_code}' http://example.com" 2>/dev/null | grep -q '^2'
+  # 3 попытки с паузой — один-единственный curl без повтора ловил ложные
+  # "Связи нет" сразу после того, как сценарий что-то заметно погонял
+  # внутри гостя (сборку, скачивание) — транзиентная задержка DNS/сети
+  # на пару секунд не означает, что стенд реально сломан.
+  for _ in 1 2 3; do
+    if "$VMCTL" ssh "curl.exe -s --max-time 10 -o NUL -w '%{http_code}' http://example.com" 2>/dev/null | grep -q '^2'; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
 }
 
 # --- 1. снимок pre-<тест>, старые pre-* храним не больше 3 ---

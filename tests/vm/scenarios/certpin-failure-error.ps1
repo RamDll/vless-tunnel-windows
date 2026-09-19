@@ -61,10 +61,16 @@ try {
     Add-Step -Step 'on: Ok is false (certPin failure must not silently start tunnel)' `
         -Expected $false -Actual ([bool]$onResp.Ok) -Pass (-not [bool]$onResp.Ok) -Info $onResp.Error
 
+    # TunnelState сериализуется в JSON числом (System.Text.Json без
+    # JsonStringEnumConverter), не строкой — Off=0, Starting=1, On=2,
+    # Stopping=3, Error=4 (VlessTunnel.Core.Ipc.IpcMessages). Найдено
+    # живым тестом: сравнение со строкой 'Error' давало ложный FAIL,
+    # хотя сама служба уже вела себя правильно (Ok=false, текст ошибки
+    # на месте) — сравниваем с числом.
     $statusResp = Invoke-VtIpc -Cmd 'status'
     $stateActual = "$($statusResp.Status.State)"
-    Add-Step -Step 'status: State is Error (not On, not silently Off)' `
-        -Expected 'Error' -Actual $stateActual -Pass ($stateActual -eq 'Error')
+    Add-Step -Step 'status: State is Error=4 (not On=2, not silently Off=0)' `
+        -Expected 4 -Actual $stateActual -Pass ($stateActual -eq '4')
 
     $errActual = "$($statusResp.Status.Error)"
     Add-Step -Step 'status: Error text present and non-empty' `
