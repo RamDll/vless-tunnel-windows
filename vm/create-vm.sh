@@ -62,6 +62,16 @@ fi
 sudo virsh net-start vt-mgmt >/dev/null 2>&1 || true
 sudo virsh net-autostart vt-mgmt >/dev/null 2>&1 || true
 
+# Ревью п.22: третий сетевой адаптер для живых тестов смены сети — NAT,
+# отдельная подсеть от default (см. vm/vt-test2-network.xml). vt-mgmt при
+# этом не трогаем и не используем как объект теста (управляющий канал).
+if ! sudo virsh net-info vt-test2 >/dev/null 2>&1; then
+  log "Определяю сеть vt-test2"
+  sudo virsh net-define "$SCRIPT_DIR/vt-test2-network.xml"
+fi
+sudo virsh net-start vt-test2 >/dev/null 2>&1 || true
+sudo virsh net-autostart vt-test2 >/dev/null 2>&1 || true
+
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -100,6 +110,7 @@ sudo virt-install \
   --disk path="$RESOURCE_ISO",device=cdrom,bus=sata,readonly=on \
   --network network=default,model=e1000e \
   --network network=vt-mgmt,model=e1000e,mac=52:54:00:89:6c:86 \
+  --network network=vt-test2,model=e1000e,mac=52:54:00:89:6c:87 \
   --graphics spice --video qxl --channel spicevmc \
   --channel unix,target_type=virtio,name=org.qemu.guest_agent.0 \
   --os-variant win10 \

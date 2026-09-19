@@ -29,6 +29,10 @@ internal delegate void InterfaceChangeCallback(nint callerContext, nint row, Mib
 internal static class IpHelper
 {
     internal const uint NO_ERROR = 0;
+    // GetBestRoute2 с явным interfaceIndex (ревью п.22): "нет маршрута до
+    // destination именно через этот интерфейс" — ожидаемый, не аварийный
+    // исход перебора кандидатов, не просто "какая-то ошибка".
+    internal const uint ERROR_NOT_FOUND = 1168;
 
     [DllImport("iphlpapi.dll")]
     internal static extern uint CreateUnicastIpAddressEntry(ref MIB_UNICASTIPADDRESS_ROW row);
@@ -54,6 +58,14 @@ internal static class IpHelper
 
     [DllImport("iphlpapi.dll")]
     internal static extern uint ConvertInterfaceIndexToLuid(uint interfaceIndex, out NET_LUID interfaceLuid);
+
+    // Ревью п.22: метрика интерфейса — единственный ЧЕСТНО новый P/Invoke
+    // (в отличие от GetBestRoute2 выше, у которого нужный параметр interfaceIndex
+    // уже был объявлен, просто не использовался). Row передаётся по ссылке:
+    // на входе достаточно Family+InterfaceIndex, остальное заполняет сама
+    // функция.
+    [DllImport("iphlpapi.dll")]
+    internal static extern uint GetIpInterfaceEntry(ref MIB_IPINTERFACE_ROW row);
 
     [DllImport("iphlpapi.dll")]
     internal static extern uint NotifyRouteChange2(

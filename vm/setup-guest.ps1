@@ -106,6 +106,20 @@ Step 'Управляющая сеть vt-mgmt: SSH только на ней' {
     Restart-Service sshd
 }
 
+# Ревью п.22: третий адаптер для живых тестов смены сети (NAT, отдельная
+# подсеть от default, см. vm/vt-test2-network.xml/create-vm.sh) — только
+# переименование для консистентности, SSH его не касается вовсе.
+Step 'Переименовать тестовый адаптер vt-test2' {
+    $testMacWindows = ('52:54:00:89:6c:87' -replace ':', '-').ToUpper()
+    $nic = $null
+    for ($i = 0; $i -lt 30 -and -not $nic; $i++) {
+        $nic = Get-NetAdapter | Where-Object { $_.MacAddress -eq $testMacWindows }
+        if (-not $nic) { Start-Sleep -Seconds 2 }
+    }
+    if (-not $nic) { throw "vt-test2 адаптер (MAC $testMacWindows) не появился за отведённое время" }
+    if ($nic.Name -ne 'vt-test2') { Rename-NetAdapter -Name $nic.Name -NewName 'vt-test2' }
+}
+
 Step 'SSH-ключ администратора' {
     $keyFile = "$ToolsDir\authorized_key.pub"
     if (-not (Test-Path $keyFile)) { throw "authorized_key.pub not found at $keyFile" }

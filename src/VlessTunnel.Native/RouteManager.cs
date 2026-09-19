@@ -59,6 +59,52 @@ public static class RouteManager
         return (bestRoute.NextHop.ToIpAddress(), (int)bestRoute.InterfaceIndex);
     }
 
+    /// <summary>Win32-код ERROR_NOT_FOUND — ожидаемый, не аварийный исход
+    /// <see cref="GetBestRouteOnInterface"/> (ревью п.22): "маршрута до
+    /// destination именно через этот интерфейс нет", не сбой.</summary>
+    public const int ErrorNotFound = (int)IpHelper.ERROR_NOT_FOUND;
+
+    /// <summary>
+    /// GetBestRoute2, ограниченный КОНКРЕТНЫМ интерфейсом (ревью п.22).
+    /// Без этого ограничения (interfaceIndex=0, как в <see cref="GetBestGateway"/>)
+    /// поиск идёт по ВСЕЙ таблице маршрутов — пока поднят TUN, там уже
+    /// есть /1-маршруты через него, которые Windows выбирает раньше
+    /// физического /0-default просто потому, что префикс длиннее, вне
+    /// зависимости от метрики. С заданным interfaceIndex поиск ведётся
+    /// строго в его пределах — TUN физически не может оказаться в
+    /// кандидатах, раз он не является запрошенным интерфейсом.
+    /// Бросает Win32Exception с кодом <see cref="ErrorNotFound"/>, если
+    /// маршрута до destination через ЭТОТ интерфейс нет — вызывающий код
+    /// (перебор кандидатов) обрабатывает это как "не кандидат", не как
+    /// ошибку.
+    /// </summary>
+    public static (IPAddress NextHop, uint Metric) GetBestRouteOnInterface(IPAddress destination, int interfaceIndex)
+    {
+        var dest = SOCKADDR_INET.FromIpAddress(destination);
+        var err = IpHelper.GetBestRoute2(0, (uint)interfaceIndex, 0, ref dest, 0, out var bestRoute, out _);
+        if (err != IpHelper.NO_ERROR)
+            throw new Win32Exception((int)err, $"GetBestRoute2({destination}, ifIndex={interfaceIndex}) failed");
+        return (bestRoute.NextHop.ToIpAddress(), bestRoute.Metric);
+    }
+
+    /// <summary>
+    /// Метрика интерфейса (ревью п.22) — интерфейсная составляющая
+    /// эффективной метрики маршрута (документация MIB_IPINTERFACE_ROW:
+    /// "actual route metric... is the summation of the route metric...
+    /// and the interface metric"). Нужна, чтобы выбирать между НЕСКОЛЬКИМИ
+    /// одновременно поднятыми физическими интерфейсами (Ethernet и Wi-Fi
+    /// разом) так же, как это делает сама Windows — по минимальной сумме,
+    /// а не "первый попавшийся".
+    /// </summary>
+    public static uint GetInterfaceMetric(int interfaceIndex)
+    {
+        var row = MIB_IPINTERFACE_ROW.ForQuery((uint)interfaceIndex);
+        var err = IpHelper.GetIpInterfaceEntry(ref row);
+        if (err != IpHelper.NO_ERROR)
+            throw new Win32Exception((int)err, $"GetIpInterfaceEntry(ifIndex={interfaceIndex}) failed");
+        return row.Metric;
+    }
+
     /// <summary>
     /// LUID интерфейса по его индексу — нужен kill-switch'у (план, 3.3):
     /// условие FWPM_CONDITION_IP_LOCAL_INTERFACE в WFP матчится по LUID,

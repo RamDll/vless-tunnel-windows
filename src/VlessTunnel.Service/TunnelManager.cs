@@ -121,7 +121,10 @@ public sealed class TunnelManager : IAsyncDisposable
 
         // 2. Запомнить текущий физический шлюз/интерфейс (п.2) — ДО того,
         // как появятся собственные маршруты через TUN, которые исказят ответ.
-        (_physicalGateway, _physicalIfIndex) = RouteManager.GetBestGateway(_serverIp);
+        // FindBestPhysicalGateway (не GetBestGateway) — тот же метод, что и
+        // сверка ниже (ревью п.22): TUN ещё не поднят на этом шаге, исключать
+        // из кандидатов нечего, но метод один и тот же ради единообразия.
+        (_physicalGateway, _physicalIfIndex) = FindBestPhysicalGateway(_serverIp);
         _log($"Физический шлюз: {_physicalGateway} (ifIndex={_physicalIfIndex})");
 
         // 3. Собрать config.json с уже разрешённым IP в vnext.address.
@@ -153,13 +156,13 @@ public sealed class TunnelManager : IAsyncDisposable
         // интерфейса. Лечится так же — короткими повторами, а не фиксированной
         // паузой "на глаз".
         var (v4Addr, v4Prefix) = CidrUtil.Parse(winOptions.TunAddressV4);
-        WithRetry(() => RouteManager.AddAddress(v4Addr, v4Prefix, _tunIfIndex));
+        WithRetry(() => RouteManager.AddAddress(v4Addr, v4Prefix, _tunIfIndex), ct);
         _teardown.Add(() => TrySafe(() => RouteManager.RemoveAddress(v4Addr, _tunIfIndex), "удаление TUN IPv4-адреса"));
 
         if (winOptions.TunAddressV6 is { Length: > 0 } v6Cidr)
         {
             var (v6Addr, v6Prefix) = CidrUtil.Parse(v6Cidr);
-            WithRetry(() => RouteManager.AddAddress(v6Addr, v6Prefix, _tunIfIndex));
+            WithRetry(() => RouteManager.AddAddress(v6Addr, v6Prefix, _tunIfIndex), ct);
             _teardown.Add(() => TrySafe(() => RouteManager.RemoveAddress(v6Addr, _tunIfIndex), "удаление TUN IPv6-адреса"));
         }
 
@@ -174,13 +177,13 @@ public sealed class TunnelManager : IAsyncDisposable
 
         // 7. Маршруты (п.6): хост-маршрут до сервера через физический шлюз
         // (анти-петля), default-покрытие через TUN двумя половинками /1.
-        AddHostRoute();
-        AddSplitDefaultRoute(IPAddress.Parse("0.0.0.0"), 1);
-        AddSplitDefaultRoute(IPAddress.Parse("128.0.0.0"), 1);
+        AddHostRoute(_physicalGateway, _physicalIfIndex, ct);
+        AddSplitDefaultRoute(IPAddress.Parse("0.0.0.0"), 1, ct);
+        AddSplitDefaultRoute(IPAddress.Parse("128.0.0.0"), 1, ct);
         if (winOptions.TunAddressV6 is not null)
         {
-            AddSplitDefaultRoute(IPAddress.Parse("::"), 1);
-            AddSplitDefaultRoute(IPAddress.Parse("8000::"), 1);
+            AddSplitDefaultRoute(IPAddress.Parse("::"), 1, ct);
+            AddSplitDefaultRoute(IPAddress.Parse("8000::"), 1, ct);
         }
 
         // 8. Слежение за сменой сети (Wi-Fi/кабель/сон) — пересчитать шлюз,
@@ -296,7 +299,7 @@ public sealed class TunnelManager : IAsyncDisposable
         _ = stdoutTask; // стандартный вывод netsh не используется, но вычитывается — иначе именно он и переполняется
     }
 
-    private void AddHostRoute()
+    private void AddHostRoute(IPAddress gateway, int ifIndex, CancellationToken ct, int attempts = StartupRetryAttempts, int delayMs = StartupRetryDelayMs)
     {
         var prefixLength = (byte)(_serverIp!.AddressFamily == AddressFamily.InterNetwork ? 32 : 128);
         // Ревью п.10 (найдено при живом тесте самого фикса восстановления
@@ -310,9 +313,9 @@ public sealed class TunnelManager : IAsyncDisposable
         // существующая запись, которая сама по себе никуда не денется.
         // Снимаем возможный осиротевший маршрут ПЕРЕД добавлением —
         // best-effort — если ничего не найдено, TrySafe просто это проглотит.
-        TrySafe(() => RouteManager.RemoveRoute(_serverIp, prefixLength, _physicalGateway, _physicalIfIndex), "снятие возможного осиротевшего хост-маршрута перед добавлением");
-        WithRetry(() => RouteManager.AddRoute(_serverIp, prefixLength, _physicalGateway, _physicalIfIndex, metric: 0));
-        _log($"Хост-маршрут до сервера: {_serverIp}/{prefixLength} via {_physicalGateway} (ifIndex={_physicalIfIndex})");
+        TrySafe(() => RouteManager.RemoveRoute(_serverIp, prefixLength, gateway, ifIndex), "снятие возможного осиротевшего хост-маршрута перед добавлением");
+        WithRetry(() => RouteManager.AddRoute(_serverIp, prefixLength, gateway, ifIndex, metric: 0), ct, attempts, delayMs);
+        _log($"Хост-маршрут до сервера: {_serverIp}/{prefixLength} via {gateway} (ifIndex={ifIndex})");
     }
 
     private void RemoveHostRoute(IPAddress gateway, int ifIndex)
@@ -321,9 +324,9 @@ public sealed class TunnelManager : IAsyncDisposable
         TrySafe(() => RouteManager.RemoveRoute(_serverIp, prefixLength, gateway, ifIndex), "удаление хост-маршрута до сервера");
     }
 
-    private void AddSplitDefaultRoute(IPAddress network, byte prefixLength)
+    private void AddSplitDefaultRoute(IPAddress network, byte prefixLength, CancellationToken ct)
     {
-        WithRetry(() => RouteManager.AddRoute(network, prefixLength, nextHop: null, _tunIfIndex, metric: 0));
+        WithRetry(() => RouteManager.AddRoute(network, prefixLength, nextHop: null, _tunIfIndex, metric: 0), ct);
         _teardown.Add(() => TrySafe(() => RouteManager.RemoveRoute(network, prefixLength, null, _tunIfIndex), $"удаление маршрута {network}/{prefixLength}"));
     }
 
@@ -338,7 +341,23 @@ public sealed class TunnelManager : IAsyncDisposable
     /// </summary>
     private const int AlreadyExists = 5010;
 
-    private void WithRetry(Action action, int attempts = 30, int delayMs = 500)
+    // Ревью п.20 (заодно с п.22): WithRetry раньше не получал токен отмены
+    // вовсе и спал через Thread.Sleep — если StopAsync отменял воркер
+    // (см. _watchCts) ровно во время серии повторов, off вставал на всё
+    // оставшееся время повторов (до 15с на старом бюджете), под общим
+    // _gate контроллера — то есть повисала вся служба для всех клиентов.
+    // Теперь токен проверяется на каждой паузе (Task.Delay(ct), не
+    // Thread.Sleep), и у сверочного пути (ReconcileHostRoute/
+    // CheckSplitHalf, вызываются из воркера) — свой, намного более
+    // короткий бюджет: 15с там не нужны и вредны, сверка и так повторится
+    // на следующем цикле. Стартовый бюджет (30×500мс, ожидание только
+    // что созданного интерфейса при StartAsync) не менялся.
+    private const int StartupRetryAttempts = 30;
+    private const int StartupRetryDelayMs = 500;
+    private const int ReconcileRetryAttempts = 5;
+    private const int ReconcileRetryDelayMs = 200;
+
+    private void WithRetry(Action action, CancellationToken ct, int attempts = StartupRetryAttempts, int delayMs = StartupRetryDelayMs)
     {
         for (var i = 1; ; i++)
         {
@@ -350,7 +369,7 @@ public sealed class TunnelManager : IAsyncDisposable
             }
             catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == AlreadyExists && i < attempts)
             {
-                Thread.Sleep(delayMs);
+                Task.Delay(delayMs, ct).GetAwaiter().GetResult();
             }
         }
     }
@@ -427,7 +446,13 @@ public sealed class TunnelManager : IAsyncDisposable
 
             try
             {
-                await ReconcileNetworkStateAsync();
+                await ReconcileNetworkStateAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // StopAsync отменил ровно во время сверки (см. ревью п.20) —
+                // выходим тихо, это не сбой, а штатная остановка.
+                return;
             }
             catch (Exception ex)
             {
@@ -440,13 +465,16 @@ public sealed class TunnelManager : IAsyncDisposable
     /// Полная идемпотентная сверка (план, 3.9: "после сна и гибернации —
     /// полная проверка маршрутов и адаптера, не только по уведомлениям").
     /// Каждая проверка сама решает, чинить ли что-то — безопасно звать на
-    /// каждый тик таймера, даже если ничего не изменилось.
+    /// каждый тик таймера, даже если ничего не изменилось. ct — токен
+    /// жизни воркера (см. _watchCts): StopAsync его отменяет и ДОЖИДАЕТСЯ
+    /// воркер, поэтому любой WithRetry внутри сверки должен реагировать на
+    /// него быстро, а не спать полный бюджет (ревью п.20).
     /// </summary>
-    private async Task ReconcileNetworkStateAsync()
+    private async Task ReconcileNetworkStateAsync(CancellationToken ct)
     {
         if (_serverIp is null || _winOptions is null) return;
 
-        ReconcileHostRoute();
+        ReconcileHostRoute(ct);
 
         // Если xray.exe умер сам по себе (не через StopAsync), TUN-адаптер
         // исчезает вместе с ним, а _tunIfIndex остаётся указывать на уже
@@ -465,7 +493,7 @@ public sealed class TunnelManager : IAsyncDisposable
         // запись без валидации интерфейса — в обоих случаях безопасно.
         try
         {
-            ReconcileSplitDefaultRoutes();
+            ReconcileSplitDefaultRoutes(ct);
             ReconcileTunAddresses();
             await ReconcileTunDnsAsync();
         }
@@ -475,43 +503,143 @@ public sealed class TunnelManager : IAsyncDisposable
         }
     }
 
-    private void ReconcileHostRoute()
+    /// <summary>
+    /// Ревью п.22: раньше физический шлюз/интерфейс пересчитывался через
+    /// НЕограниченный GetBestRoute2 (interfaceIndex=0) — пока туннель
+    /// поднят, в таблице уже есть 0.0.0.0/1 и 128.0.0.0/1 через TUN, а
+    /// Windows выбирает маршрут СНАЧАЛА по длине префикса, потом по
+    /// метрике: /1 длиннее любого физического /0-default, поэтому
+    /// неограниченный поиск для ЛЮБОГО адреса (в частности — для самого
+    /// сервера, как только его /32-хост-маршрут снят перед пересчётом)
+    /// ГАРАНТИРОВАННО возвращал TUN, не изредка. Старый "жёсткий
+    /// инвариант" ниже поэтому срабатывал не как редкая страховка от
+    /// гонки с задержанным событием NLA (как было написано в комментарии —
+    /// объяснение оказалось неверным), а КАЖДЫЙ раз: реальная смена сети
+    /// не детектировалась НИКОГДА, пока туннель включён. Подтверждено
+    /// живым тестом: ручное снятие хост-маршрута на поднятом туннеле
+    /// стабильно, не изредка, даёт "вернул сам TUN".
+    ///
+    /// Правильный способ — ограничить поиск КОНКРЕТНЫМ интерфейсом
+    /// (см. RouteManager.GetBestRouteOnInterface): тогда TUN физически не
+    /// может подменить ответ, раз он не в кандидатах. Перебираем поднятые
+    /// физические интерфейсы с IPv4-шлюзом (TUN исключён явно), для
+    /// каждого спрашиваем "будь у нас только этот интерфейс, как бы ты
+    /// пошёл до destination" — нашёлся маршрут именно на нём, это
+    /// кандидат. Между кандидатами (одновременно поднятые Ethernet и
+    /// Wi-Fi) выбираем как сама Windows — по минимальной сумме метрики
+    /// маршрута и метрики интерфейса (GetIpInterfaceEntry), не "первый
+    /// попавшийся": просто первый адаптер в списке не годится именно в
+    /// этом сценарии.
+    /// </summary>
+    private (IPAddress Gateway, int InterfaceIndex) FindBestPhysicalGateway(IPAddress destination)
     {
-        var oldGateway = _physicalGateway!;
-        var oldIfIndex = _physicalIfIndex;
-
-        // Снять старый хост-маршрут ПЕРЕД пересчётом — иначе GetBestRoute2
-        // увидит наш же (возможно, уже неверный) маршрут и вернёт его снова.
-        // Делается безусловно на каждый прогон (не только когда что-то
-        // видимо изменилось) — иначе застарелый, но всё ещё физически
-        // присутствующий маршрут маскировал бы от GetBestRoute2 реальную
-        // смену шлюза на том же интерфейсе (например, DHCP выдал новый
-        // шлюз без смены ifIndex).
-        RemoveHostRoute(oldGateway, oldIfIndex);
-
-        var (newGateway, newIfIndex) = RouteManager.GetBestGateway(_serverIp!);
-
-        // Жёсткий инвариант, а не только тайминг: анти-петлевой хост-маршрут
-        // НИКОГДА не должен указывать на сам TUN — живым тестом на стенде
-        // подтверждено, что окно подавления (см. _suppressNetworkChangeUntilUtc)
-        // не ловит всё (например, задержанное событие NLA/Windows от самого
-        // факта появления TUN-адаптера может прийти позже 2-секундного окна).
-        // Без этой проверки такой ложный триггер один раз — и хост-маршрут
-        // навсегда остаётся зациклен через TUN, пока не придёт следующий.
-        if (newIfIndex == _tunIfIndex)
+        (IPAddress Gateway, int IfIndex, long Score)? best = null;
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
         {
-            _log($"Пересчёт шлюза вернул сам TUN (ifIndex={newIfIndex}) — игнорирую как ложный, восстанавливаю прежний {oldGateway}(if={oldIfIndex})");
-            _physicalGateway = oldGateway;
-            _physicalIfIndex = oldIfIndex;
-            AddHostRoute();
+            // Живым тестом поймано: GetIPv4Properties()/GetIPProperties() на
+            // некоторых интерфейсах (виртуальные/псевдо-адаптеры без полной
+            // IPv4-конфигурации) не просто возвращают null, а БРОСАЮТ
+            // NetworkInformationException — один такой интерфейс не должен
+            // ронять весь пересчёт шлюза, просто не кандидат.
+            try
+            {
+                if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                var props = nic.GetIPProperties();
+                var ifIndex = props.GetIPv4Properties()?.Index;
+                if (ifIndex is null || ifIndex.Value == _tunIfIndex) continue;
+                if (!props.GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork)) continue;
+
+                IPAddress nextHop;
+                uint routeMetric;
+                try
+                {
+                    (nextHop, routeMetric) = RouteManager.GetBestRouteOnInterface(destination, ifIndex.Value);
+                }
+                catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == RouteManager.ErrorNotFound)
+                {
+                    continue; // маршрута до destination именно через этот интерфейс нет — не кандидат
+                }
+
+                uint ifMetric;
+                try
+                {
+                    ifMetric = RouteManager.GetInterfaceMetric(ifIndex.Value);
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    continue; // не удалось получить метрику интерфейса — не рискуем, пропускаем как кандидата
+                }
+
+                var score = (long)routeMetric + ifMetric;
+                if (best is null || score < best.Value.Score)
+                    best = (nextHop, ifIndex.Value, score);
+            }
+            catch (NetworkInformationException)
+            {
+                continue; // интерфейс не даёт себя нормально опросить — не кандидат, не фатально
+            }
+        }
+
+        if (best is null)
+            throw new InvalidOperationException($"Не найден ни один физический интерфейс с маршрутом до {destination}");
+        return (best.Value.Gateway, best.Value.IfIndex);
+    }
+
+    private void ReconcileHostRoute(CancellationToken ct)
+    {
+        (IPAddress Gateway, int IfIndex) desired;
+        try
+        {
+            desired = FindBestPhysicalGateway(_serverIp!);
+        }
+        catch (Exception ex)
+        {
+            _log($"Не удалось пересчитать физический шлюз до сервера — {ex.Message}. Оставляю прежний {_physicalGateway}(if={_physicalIfIndex}), повторю на следующем цикле.");
             return;
         }
 
-        _physicalGateway = newGateway;
-        _physicalIfIndex = newIfIndex;
-        AddHostRoute();
+        // Страховка на случай бага в фильтрации кандидатов выше — TUN туда
+        // попасть не должен ни при каких обстоятельствах (в отличие от
+        // старого кода, это больше не единственная защита, см. комментарий
+        // у FindBestPhysicalGateway), но если вдруг, лучше явно отказаться
+        // и оставить прежнее состояние, чем зациклить хост-маршрут через
+        // сам туннель.
+        if (desired.IfIndex == _tunIfIndex)
+        {
+            _log($"FindBestPhysicalGateway вернул сам TUN (ifIndex={desired.IfIndex}) — это баг в фильтрации кандидатов, игнорирую и оставляю прежний шлюз {_physicalGateway}(if={_physicalIfIndex}).");
+            return;
+        }
 
-        if (!_physicalGateway.Equals(oldGateway) || _physicalIfIndex != oldIfIndex)
+        // "Есть на самом деле" — БЕЗ ограничения интерфейсом: если хост-
+        // маршрут реально в таблице, его /32 длиннее любого /1 через TUN и
+        // однозначно побеждает без всякой путаницы (в отличие от поиска
+        // "какой шлюз должен быть", здесь неограниченный GetBestGateway —
+        // ровно та проверка, которая нужна: есть ли уже наш маршрут). Если
+        // маршрута нет вовсе (кто-то снял руками, либо старый шлюз мёртв
+        // после смены сети), самый длинный ПОДХОДЯЩИЙ префикс — один из /1
+        // через TUN, и это сигнал, что таблицу нужно чинить.
+        var (actualGateway, actualIfIndex) = RouteManager.GetBestGateway(_serverIp!);
+        if (actualIfIndex != _tunIfIndex && actualGateway.Equals(desired.Gateway) && actualIfIndex == desired.IfIndex)
+            return; // и совпадает с ожидаемым, и реально в таблице — трогать нечего (закрывает и п.19)
+
+        var oldGateway = _physicalGateway!;
+        var oldIfIndex = _physicalIfIndex;
+        RemoveHostRoute(oldGateway, oldIfIndex); // best-effort (TrySafe внутри) — не страшно, если там уже пусто
+
+        try
+        {
+            AddHostRoute(desired.Gateway, desired.IfIndex, ct, ReconcileRetryAttempts, ReconcileRetryDelayMs);
+        }
+        catch (Exception ex)
+        {
+            _log($"Не удалось добавить хост-маршрут через {desired.Gateway}(if={desired.IfIndex}) — {ex.Message}. Хост-маршрут временно отсутствует, повторю на следующем цикле.");
+            return; // _physicalGateway/_physicalIfIndex НЕ обновляем — следующий цикл пересчитает заново
+        }
+
+        var changed = !desired.Gateway.Equals(oldGateway) || desired.IfIndex != oldIfIndex;
+        _physicalGateway = desired.Gateway;
+        _physicalIfIndex = desired.IfIndex;
+        if (changed)
             _log($"Сеть сменилась: шлюз {oldGateway}(if={oldIfIndex}) -> {_physicalGateway}(if={_physicalIfIndex})");
     }
 
@@ -522,25 +650,25 @@ public sealed class TunnelManager : IAsyncDisposable
     /// 0.0.0.0/1, но у loopback всегда отдельный, более специфичный
     /// маршрут, не через TUN.
     /// </summary>
-    private void ReconcileSplitDefaultRoutes()
+    private void ReconcileSplitDefaultRoutes(CancellationToken ct)
     {
-        CheckSplitHalf(IPAddress.Parse("1.0.0.0"), IPAddress.Parse("0.0.0.0"));
-        CheckSplitHalf(IPAddress.Parse("129.0.0.0"), IPAddress.Parse("128.0.0.0"));
+        CheckSplitHalf(IPAddress.Parse("1.0.0.0"), IPAddress.Parse("0.0.0.0"), ct);
+        CheckSplitHalf(IPAddress.Parse("129.0.0.0"), IPAddress.Parse("128.0.0.0"), ct);
         if (_winOptions!.TunAddressV6 is not null)
         {
-            CheckSplitHalf(IPAddress.Parse("1::"), IPAddress.Parse("::"));
-            CheckSplitHalf(IPAddress.Parse("8001::"), IPAddress.Parse("8000::"));
+            CheckSplitHalf(IPAddress.Parse("1::"), IPAddress.Parse("::"), ct);
+            CheckSplitHalf(IPAddress.Parse("8001::"), IPAddress.Parse("8000::"), ct);
         }
     }
 
-    private void CheckSplitHalf(IPAddress probe, IPAddress network)
+    private void CheckSplitHalf(IPAddress probe, IPAddress network, CancellationToken ct)
     {
         var (_, ifIndex) = RouteManager.GetBestGateway(probe);
         if (ifIndex == _tunIfIndex) return; // маршрут на месте
 
         _log($"Сверка: /1-маршрут {network}/1 через TUN пропал — восстанавливаю");
         TrySafe(() => RouteManager.RemoveRoute(network, 1, null, _tunIfIndex), $"снятие возможного осиротевшего {network}/1 перед восстановлением");
-        WithRetry(() => RouteManager.AddRoute(network, 1, nextHop: null, _tunIfIndex, metric: 0));
+        WithRetry(() => RouteManager.AddRoute(network, 1, nextHop: null, _tunIfIndex, metric: 0), ct, ReconcileRetryAttempts, ReconcileRetryDelayMs);
     }
 
     /// <summary>Адрес(а) TUN-адаптера — сверка через System.Net.NetworkInformation

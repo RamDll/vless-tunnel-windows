@@ -106,3 +106,64 @@ internal struct MIB_IPFORWARD_ROW2
         Origin = 0,     // NlroManual
     };
 }
+
+/// <summary>
+/// MIB_IPINTERFACE_ROW (netioapi.h) — нужен только <see cref="Metric"/>
+/// (ревью п.22: интерфейсная составляющая эффективной метрики маршрута,
+/// см. GetIpInterfaceEntry/RouteManager.GetInterfaceMetric). Разметка
+/// взята дословно из официальной документации Microsoft (все поля по
+/// порядку, включая NL_INTERFACE_OFFLOAD_ROD — битовое поле над BOOLEAN,
+/// то есть 1 байт), не по памяти — самая большая и рискованная из P/Invoke
+/// структур в этом проекте, ошибка в разметке при вызове GetIpInterfaceEntry
+/// (структура передаётся по ссылке и заполняется нативным кодом) могла бы
+/// побить память за её пределами. Ожидаемый размер на x64 — 168 байт,
+/// проверено <c>NativeStructLayoutTests</c> и живым тестом (возвращённый
+/// Metric сверен с Get-NetIPInterface на стенде).
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct MIB_IPINTERFACE_ROW
+{
+    public short Family;                              // ADDRESS_FAMILY, offset 0 (6 байт паддинга до NET_LUID)
+    public NET_LUID InterfaceLuid;                     // offset 8
+    public uint InterfaceIndex;                        // offset 16 (NET_IFINDEX = ULONG)
+    public uint MaxReassemblySize;                     // offset 20
+    public ulong InterfaceIdentifier;                  // offset 24
+    public uint MinRouterAdvertisementInterval;        // offset 32
+    public uint MaxRouterAdvertisementInterval;        // offset 36
+    public byte AdvertisingEnabled;                    // offset 40 (BOOLEAN)
+    public byte ForwardingEnabled;                     // offset 41
+    public byte WeakHostSend;                          // offset 42
+    public byte WeakHostReceive;                       // offset 43
+    public byte UseAutomaticMetric;                    // offset 44
+    public byte UseNeighborUnreachabilityDetection;    // offset 45
+    public byte ManagedAddressConfigurationSupported;  // offset 46
+    public byte OtherStatefulConfigurationSupported;   // offset 47
+    public byte AdvertiseDefaultRoute;                 // offset 48 (3 байта паддинга до enum)
+    public int RouterDiscoveryBehavior;                // offset 52, NL_ROUTER_DISCOVERY_BEHAVIOR
+    public uint DadTransmits;                          // offset 56
+    public uint BaseReachableTime;                     // offset 60
+    public uint RetransmitTime;                        // offset 64
+    public uint PathMtuDiscoveryTimeout;               // offset 68
+    public int LinkLocalAddressBehavior;               // offset 72, NL_LINK_LOCAL_ADDRESS_BEHAVIOR
+    public uint LinkLocalAddressTimeout;                // offset 76
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+    public uint[] ZoneIndices;                          // offset 80, ScopeLevelCount=16 -> 64 байта
+    public uint SitePrefixLength;                       // offset 144
+    public uint Metric;                                 // offset 148 — единственное, что нам реально нужно
+    public uint NlMtu;                                  // offset 152
+    public byte Connected;                              // offset 156
+    public byte SupportsWakeUpPatterns;                 // offset 157
+    public byte SupportsNeighborDiscovery;              // offset 158
+    public byte SupportsRouterDiscovery;                // offset 159
+    public uint ReachableTime;                          // offset 160
+    public byte TransmitOffload;                        // offset 164, NL_INTERFACE_OFFLOAD_ROD (битовые флаги, 1 байт)
+    public byte ReceiveOffload;                         // offset 165
+    public byte DisableDefaultRoutes;                   // offset 166 (паддинг до 168 в конце структуры)
+
+    public static MIB_IPINTERFACE_ROW ForQuery(uint interfaceIndex) => new()
+    {
+        Family = 2, // AF_INET — GetIpInterfaceEntry требует явно проставленный Family на входе
+        InterfaceIndex = interfaceIndex,
+        ZoneIndices = new uint[16],
+    };
+}

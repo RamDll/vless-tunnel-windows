@@ -69,6 +69,37 @@ public sealed class StructLayoutTests
     [Fact]
     public void Net_luid_is_8_bytes() => Assert.Equal(8, Marshal.SizeOf<NET_LUID>());
 
+    // Ревью п.22: MIB_IPINTERFACE_ROW — самая большая и рискованная из
+    // P/Invoke структур в проекте (GetIpInterfaceEntry заполняет её по
+    // ссылке нативным кодом), разметка целиком по официальной
+    // документации Microsoft, не по памяти. Смещения ниже — не все поля
+    // подряд, а опорные точки: начало/конец каждого блока однотипных
+    // полей плюс Metric (единственное поле, которое реально читаем).
+    [Fact]
+    public void Mib_ipinterface_row_is_168_bytes_with_documented_offsets()
+    {
+        Assert.Equal(168, Marshal.SizeOf<MIB_IPINTERFACE_ROW>());
+        Assert.Equal(0, Offset(nameof(MIB_IPINTERFACE_ROW.Family)));
+        Assert.Equal(8, Offset(nameof(MIB_IPINTERFACE_ROW.InterfaceLuid)));
+        Assert.Equal(16, Offset(nameof(MIB_IPINTERFACE_ROW.InterfaceIndex)));
+        Assert.Equal(20, Offset(nameof(MIB_IPINTERFACE_ROW.MaxReassemblySize)));
+        Assert.Equal(24, Offset(nameof(MIB_IPINTERFACE_ROW.InterfaceIdentifier)));
+        Assert.Equal(40, Offset(nameof(MIB_IPINTERFACE_ROW.AdvertisingEnabled)));
+        Assert.Equal(48, Offset(nameof(MIB_IPINTERFACE_ROW.AdvertiseDefaultRoute)));
+        Assert.Equal(52, Offset(nameof(MIB_IPINTERFACE_ROW.RouterDiscoveryBehavior)));
+        Assert.Equal(72, Offset(nameof(MIB_IPINTERFACE_ROW.LinkLocalAddressBehavior)));
+        Assert.Equal(80, Offset(nameof(MIB_IPINTERFACE_ROW.ZoneIndices)));
+        Assert.Equal(144, Offset(nameof(MIB_IPINTERFACE_ROW.SitePrefixLength)));
+        Assert.Equal(148, Offset(nameof(MIB_IPINTERFACE_ROW.Metric)));
+        Assert.Equal(152, Offset(nameof(MIB_IPINTERFACE_ROW.NlMtu)));
+        Assert.Equal(156, Offset(nameof(MIB_IPINTERFACE_ROW.Connected)));
+        Assert.Equal(160, Offset(nameof(MIB_IPINTERFACE_ROW.ReachableTime)));
+        Assert.Equal(164, Offset(nameof(MIB_IPINTERFACE_ROW.TransmitOffload)));
+        Assert.Equal(166, Offset(nameof(MIB_IPINTERFACE_ROW.DisableDefaultRoutes)));
+
+        static int Offset(string field) => Marshal.OffsetOf<MIB_IPINTERFACE_ROW>(field).ToInt32();
+    }
+
     [Theory]
     [InlineData("203.0.113.7")]
     [InlineData("fd00::1")]
