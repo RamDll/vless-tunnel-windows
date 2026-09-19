@@ -139,41 +139,10 @@ public sealed class TunnelManager : IAsyncDisposable
         await File.WriteAllTextAsync(_configPath, config.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ct);
         _log($"config.json записан: {_configPath}");
 
-        // 4. Запустить xray.exe под Job Object (умирает вместе со службой).
-        //
-        // ВАЖНО: RedirectStandard{Output,Error}=true создаёт анонимные
-        // pipe'ы с ограниченным буфером ОС. Если их не вычитывать, xray.exe
-        // рано или поздно блокируется на записи в свой же лог — а значит
-        // блокируется и весь дальнейший запуск (включая поднятие TUN).
-        // Это правдоподобно объясняет замеченную на стенде нестабильность
-        // времени появления адаптера (от ~1 с до таймаута в 40 с): раньше
-        // потоки не вычитывались вовсе. BeginOutputReadLine/BeginErrorReadLine
-        // держат pipe'ы свободными постоянно, асинхронно.
-        _job = new JobObject("vless-tunnel-xray");
-        var xrayStart = new ProcessStartInfo(_xrayExePath, $"run -c \"{_configPath}\"")
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        _xrayProcess = Process.Start(xrayStart) ?? throw new InvalidOperationException($"Не удалось запустить {_xrayExePath}");
-        // Redact.Secrets — защита от гипотетической, но не исключённой
-        // утечки: в норме xray на loglevel=warning не печатает содержимое
-        // конфига, но при ошибке разбора конфига МОГ БЫ процитировать его
-        // фрагмент, включая UUID (план: "секреты не попадают в вывод").
-        // Чужой процесс, его вывод — не наш контракт, поэтому фильтруем
-        // защитно, а не полагаемся на то, что xray никогда так не сделает.
-        _xrayProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) _log($"xray: {Redact.Secrets(e.Data)}"); };
-        _xrayProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) _log($"xray[err]: {Redact.Secrets(e.Data)}"); };
-        _xrayProcess.BeginOutputReadLine();
-        _xrayProcess.BeginErrorReadLine();
-        _job.Assign(_xrayProcess);
-        _teardown.Add(() => TryKillXray());
-        _log($"xray.exe запущен, pid={_xrayProcess.Id}");
-
-        // 5. Дождаться адаптера (п.4).
-        _tunIfIndex = await WaitForAdapterAsync(winOptions.TunAdapterName, TimeSpan.FromSeconds(40), ct);
+        // 4-5. Запустить xray.exe и дождаться адаптера (план, 3.2, п.4) — с
+        // повтором на транзиентную гонку пересоздания wintun-адаптера
+        // (см. LaunchXrayAndWaitForAdapterAsync и живой тест там же).
+        _tunIfIndex = await LaunchXrayAndWaitForAdapterAsync(winOptions.TunAdapterName, ct);
         _log($"Адаптер {winOptions.TunAdapterName} поднят, ifIndex={_tunIfIndex}");
 
         // 6. Адрес TUN (п.5). Сразу после появления адаптера
@@ -670,6 +639,88 @@ public sealed class TunnelManager : IAsyncDisposable
         _xrayProcess = null;
     }
 
+    // Живым тестом на стенде подтверждено: быстрый цикл off->on изредка
+    // (~30-40% в тесте из 20 подряд, воспроизводится ОДИНАКОВО что до,
+    // что после фикса 13-14 — это не регрессия, а давно существующий
+    // класс проблемы) даёт "Адаптер \"xray0\" не поднялся за 40с". Живая
+    // причина — не в нашем коде ожидания: xray.exe сам умирает куда
+    // раньше (~15 с) с "Failed to setup adapter"/"Cannot create a file
+    // when that file already exists" — Kill() у предыдущего запуска (см.
+    // TryKillXray) обрывает xray.exe без штатного закрытия сессии wintun,
+    // а PnP-объект адаптера (SWD\WINTUN\...; подтверждено Get-PnpDevice —
+    // он остаётся с тем же InstanceId между циклами, в отличие от сетевого
+    // интерфейса, который исчезает мгновенно) освобождается ОС асинхронно
+    // и не всегда успевает к следующему запуску. Ждать дольше бессмысленно
+    // (xray уже мёртв) — гонка транзиентная, повтор всего запуска xray.exe
+    // почти всегда помогает.
+    private const int MaxXrayLaunchAttempts = 3;
+
+    private async Task<int> LaunchXrayAndWaitForAdapterAsync(string adapterName, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            StartXrayProcess();
+            try
+            {
+                return await WaitForAdapterAsync(_xrayProcess!, adapterName, TimeSpan.FromSeconds(40), ct);
+            }
+            catch (XrayExitedEarlyException ex) when (attempt < MaxXrayLaunchAttempts)
+            {
+                _log($"xray.exe завершился раньше поднятия адаптера (попытка {attempt}/{MaxXrayLaunchAttempts}, похоже на гонку пересоздания wintun-адаптера) — {ex.Message}. Повтор через 2с.");
+                RetireFailedXrayAttempt();
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            }
+        }
+    }
+
+    private void StartXrayProcess()
+    {
+        // ВАЖНО: RedirectStandard{Output,Error}=true создаёт анонимные
+        // pipe'ы с ограниченным буфером ОС. Если их не вычитывать, xray.exe
+        // рано или поздно блокируется на записи в свой же лог — а значит
+        // блокируется и весь дальнейший запуск (включая поднятие TUN).
+        // BeginOutputReadLine/BeginErrorReadLine держат pipe'ы свободными
+        // постоянно, асинхронно.
+        _job = new JobObject("vless-tunnel-xray");
+        var xrayStart = new ProcessStartInfo(_xrayExePath, $"run -c \"{_configPath}\"")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        _xrayProcess = Process.Start(xrayStart) ?? throw new InvalidOperationException($"Не удалось запустить {_xrayExePath}");
+        // Redact.Secrets — защита от гипотетической, но не исключённой
+        // утечки: в норме xray на loglevel=warning не печатает содержимое
+        // конфига, но при ошибке разбора конфига МОГ БЫ процитировать его
+        // фрагмент, включая UUID (план: "секреты не попадают в вывод").
+        // Чужой процесс, его вывод — не наш контракт, поэтому фильтруем
+        // защитно, а не полагаемся на то, что xray никогда так не сделает.
+        _xrayProcess.OutputDataReceived += (_, e) => { if (e.Data is not null) _log($"xray: {Redact.Secrets(e.Data)}"); };
+        _xrayProcess.ErrorDataReceived += (_, e) => { if (e.Data is not null) _log($"xray[err]: {Redact.Secrets(e.Data)}"); };
+        _xrayProcess.BeginOutputReadLine();
+        _xrayProcess.BeginErrorReadLine();
+        _job.Assign(_xrayProcess);
+        _teardown.Add(() => TryKillXray());
+        _log($"xray.exe запущен, pid={_xrayProcess.Id}");
+    }
+
+    // Откатывает именно ПОСЛЕДНЮЮ (провалившуюся) попытку запуска —
+    // единственную запись в _teardown, добавленную StartXrayProcess этой
+    // попытки, не трогая ничего, что было накоплено раньше.
+    private void RetireFailedXrayAttempt()
+    {
+        var last = _teardown[^1];
+        _teardown.RemoveAt(_teardown.Count - 1);
+        try { last(); }
+        catch (Exception ex) { _log($"Откат неудачной попытки запуска xray.exe упал: {ex.Message}"); }
+        _job?.Dispose();
+        _job = null;
+        _xrayProcess = null;
+    }
+
+    private sealed class XrayExitedEarlyException(string message) : Exception(message);
+
     private void TryKillXray()
     {
         try
@@ -700,11 +751,19 @@ public sealed class TunnelManager : IAsyncDisposable
         finally { MarkSelfMutation(); }
     }
 
-    private static async Task<int> WaitForAdapterAsync(string adapterName, TimeSpan timeout, CancellationToken ct)
+    private static async Task<int> WaitForAdapterAsync(Process xrayProcess, string adapterName, TimeSpan timeout, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
+            // xray.exe у гонки пересоздания wintun-адаптера падает сам
+            // (~15с), задолго до нашего 40-секундного таймаута — ждать
+            // дальше бессмысленно, а быстрый выход с понятной причиной
+            // даёт LaunchXrayAndWaitForAdapterAsync шанс сразу повторить
+            // попытку, а не тратить оставшееся время впустую.
+            if (xrayProcess.HasExited)
+                throw new XrayExitedEarlyException($"xray.exe завершился раньше, чем поднялся адаптер \"{adapterName}\" (код выхода {xrayProcess.ExitCode})");
+
             var nic = NetworkInterface.GetAllNetworkInterfaces()
                 .FirstOrDefault(n => string.Equals(n.Name, adapterName, StringComparison.OrdinalIgnoreCase)
                                       && n.OperationalStatus == OperationalStatus.Up);
