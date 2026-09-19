@@ -161,15 +161,26 @@ Step 'Включить отключённые сетевые адаптеры' {
     Get-NetAdapter | Where-Object Status -eq 'Disabled' | Enable-NetAdapter -Confirm:$false
 }
 
-Step 'Сбросить DNS физических адаптеров на автомат (DHCP)' {
-    Get-DnsClientServerAddress -AddressFamily IPv4 | ForEach-Object {
+## Стенд, п.1 (задним числом — найдено живым тестом п.2): vt-mgmt (адаптер
+## управляющего канала, см. vmctl.sh) ИСКЛЮЧЁН из обоих шагов ниже.
+## release/renew DHCP именно на нём рвёт саму SSH-сессию, через которую
+## rescue.ps1 запущен, — ровно тот класс проблемы, который отдельный
+## управляющий адаптер должен был исключить. Поймано на реальном прогоне:
+## run-test.ps1 обрывался с exit 255 ровно на этом шаге rescue.ps1 (вызванного
+## из finally), отчёт не успевал записаться.
+Step 'Сбросить DNS физических адаптеров на автомат (DHCP), кроме vt-mgmt' {
+    Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object {
+        (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name -ne 'vt-mgmt'
+    } | ForEach-Object {
         Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue
     }
 }
 
-Step 'Обновить DHCP-аренду' {
-    ipconfig /release | Out-Null
-    ipconfig /renew | Out-Null
+Step 'Обновить DHCP-аренду, кроме vt-mgmt' {
+    Get-NetAdapter | Where-Object { $_.Name -ne 'vt-mgmt' -and $_.Status -eq 'Up' } | ForEach-Object {
+        ipconfig /release $_.InterfaceAlias | Out-Null
+        ipconfig /renew $_.InterfaceAlias | Out-Null
+    }
 }
 
 Step 'Сбросить маршрут по умолчанию, если он потерян' {

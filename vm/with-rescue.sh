@@ -63,9 +63,33 @@ else
   log "SCP не прошёл — сразу переходим к проверке связи"
 fi
 
-# забираем гостевой лог run-test.ps1 на хост (best effort)
+# забираем гостевой лог и JSON-отчёт run-test.ps1 на хост (best effort).
+# Стенд, п.2: вердикт считаем ТОЛЬКО по JSON (числа/структура, из
+# run-test.ps1 -> Add-Step), не по тексту транскрипта — тот проехал через
+# гостевую консоль и SSH несколько перекодировок и ловил ложные срабатывания
+# на локализованных строках системных утилит.
+#
+# scp (современный OpenSSH — только по SFTP) на обратных слешах в
+# Windows-пути молча не находит файл ("No such file or directory"), хотя
+# Get-ChildItem его только что вернул, — путь нужен с прямыми слешами
+# (SFTP-протокол, не cmd.exe; Windows одинаково понимает оба варианта).
+# Найдено живым тестом при проверке самого этого фикса (п.2): раньше
+# REMOTE_LOG_PATH тем же путём никогда фактически не долетал.
 REMOTE_LOG_PATH="$("$VMCTL" ssh "Get-ChildItem C:\\dev\\logs\\${TEST_NAME}-*.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName" 2>/dev/null | tr -d '\r')"
+REMOTE_LOG_PATH="${REMOTE_LOG_PATH//\\//}"
 [ -n "$REMOTE_LOG_PATH" ] && "$VMCTL" scp "vt-win10:$REMOTE_LOG_PATH" "$LOGDIR/" >/dev/null 2>&1
+
+REMOTE_JSON_PATH="$("$VMCTL" ssh "Get-ChildItem C:\\dev\\logs\\${TEST_NAME}-*.json -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName" 2>/dev/null | tr -d '\r')"
+REMOTE_JSON_PATH="${REMOTE_JSON_PATH//\\//}"
+TEST_VERDICT="NO_REPORT"
+if [ -n "$REMOTE_JSON_PATH" ] && "$VMCTL" scp "vt-win10:$REMOTE_JSON_PATH" "$LOGDIR/" >/dev/null 2>&1; then
+  LOCAL_JSON="$LOGDIR/$(basename "$REMOTE_JSON_PATH")"
+  TEST_VERDICT="$(jq -r '.verdict // "NO_REPORT"' "$LOCAL_JSON" 2>/dev/null || echo "NO_REPORT")"
+  echo "test_report: $LOCAL_JSON" >> "$HOSTLOG"
+  echo "test_verdict: $TEST_VERDICT" >> "$HOSTLOG"
+  jq -r '.steps[]? | select(.verdict != "PASS") | "  FAIL: " + .step + " (ожидали " + (.expected|tostring) + ", получили " + (.actual|tostring) + ")"' "$LOCAL_JSON" 2>/dev/null >> "$HOSTLOG"
+fi
+log "Вердикт теста (из JSON-отчёта): $TEST_VERDICT"
 
 # --- 4. проверка связи ---
 if [ "$SSH_OK" = "1" ] && check_net; then
@@ -96,5 +120,6 @@ fi
 
 # --- 7. успех -> снять задачу vt-rescue ---
 "$VMCTL" exec 'schtasks.exe' /Delete /TN vt-rescue /F >/dev/null 2>&1
-echo "RESULT: DONE (проверьте PASS/FAIL в госте-логе, скопированном в $LOGDIR)" >> "$HOSTLOG"
-log "Готово. Лог: $HOSTLOG"
+echo "RESULT: DONE, test_verdict=$TEST_VERDICT" >> "$HOSTLOG"
+log "Готово (машина цела). Вердикт теста: $TEST_VERDICT. Лог: $HOSTLOG"
+[ "$TEST_VERDICT" = "PASS" ]
