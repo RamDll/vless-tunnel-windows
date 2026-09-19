@@ -5,8 +5,12 @@
 #   1. снимок pre-<тест> (старые pre-* удаляются, оставляем последние 3)
 #   2. задача vt-rescue на +10 минут (страховка, если сам скрипт зависнет)
 #   3. run-test.ps1 через SSH под timeout, лог копируется в logs/vm/
+#   3'. timeout сработал (сценарий завис) -> сразу считаем стенд сломанным,
+#       минуя проверку связи (стенд, п.4: "откат после падения ИЛИ по
+#       таймауту" — зависший процесс на госте не гарантирует, что его
+#       finally/rescue.ps1 вообще выполнился, даже если сеть на вид цела)
 #   4. проверка: SSH отвечает и есть интернет без туннеля
-#   5. нет связи -> rescue.ps1 через guest agent (работает без сети), ждать до 60с
+#   5. нет связи (или был таймаут) -> rescue.ps1 через guest agent (без сети), ждать до 60с
 #   6. guest agent не помог -> откат на pre-снимок, тест = BROKE_VM
 #   7. успех -> снять задачу vt-rescue
 set -uo pipefail  # без -e: после сбоя должны выполниться шаги восстановления, не упасть
@@ -33,7 +37,14 @@ SNAP="pre-${TEST_NAME}-$(date +%Y%m%d-%H%M%S)"
 log "Снимок $SNAP"
 "$VMCTL" snapshot "$SNAP" "before $TEST_NAME" || { log "Не удалось снять снимок — тест не запускаю"; exit 1; }
 
-OLD_PRE="$("$VMCTL" snapshot-list 2>/dev/null | awk '$1 ~ /^pre-/{print $1}' | sort | head -n -3)"
+# Стенд, п.4 (найдено этим же живым тестом): сортировка по ИМЕНИ, не по
+# времени, — снимки разных тестов вперемешку (pre-acl-..., pre-break-...,
+# pre-hang-...) алфавитно сортируются не в хронологическом порядке, и
+# "оставить последние 3" по имени однажды снесло только что созданный
+# снимок ДО того, как он вообще понадобился (revert тут же упал "снимок
+# не найден", а скрипт этого не заметил и всё равно доложил об успехе).
+# Сортируем по колонке "Время создания" самого virsh, не по имени.
+OLD_PRE="$("$VMCTL" snapshot-list 2>/dev/null | awk '$1 ~ /^pre-/{print $2$3, $1}' | sort | head -n -3 | awk '{print $2}')"
 if [ -n "$OLD_PRE" ]; then
   log "Удаляю старые pre-* снимки (оставляю последние 3)"
   while IFS= read -r old; do
@@ -54,11 +65,18 @@ HOSTLOG="$LOGDIR/${TEST_NAME}-$(date +%Y%m%d-%H%M%S).host.log"
 { echo "test: $TEST_NAME"; echo "local_script: $LOCAL_SCRIPT"; echo "snapshot: $SNAP"; } > "$HOSTLOG"
 
 SSH_OK=0
+TIMED_OUT=0
 if "$VMCTL" scp "$LOCAL_SCRIPT" "vt-win10:$REMOTE_SCRIPT" >>"$HOSTLOG" 2>&1; then
   log "Запускаю run-test.ps1 через SSH (timeout 20 минут)"
   timeout 1200 "$VMCTL" ssh "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\dev\\bin\\run-test.ps1 -Name $TEST_NAME -Script $REMOTE_SCRIPT" >>"$HOSTLOG" 2>&1
-  echo "run-test.ps1 exit: $?" >> "$HOSTLOG"
-  SSH_OK=1
+  RUN_EXIT=$?
+  echo "run-test.ps1 exit: $RUN_EXIT" >> "$HOSTLOG"
+  if [ "$RUN_EXIT" = "124" ]; then
+    TIMED_OUT=1
+    log "Сценарий не уложился в 20 минут (timeout убил SSH-команду) — стенд считаем сломанным независимо от связи"
+  else
+    SSH_OK=1
+  fi
 else
   log "SCP не прошёл — сразу переходим к проверке связи"
 fi
@@ -92,7 +110,18 @@ fi
 log "Вердикт теста (из JSON-отчёта): $TEST_VERDICT"
 
 # --- 4. проверка связи ---
-if [ "$SSH_OK" = "1" ] && check_net; then
+if [ "$TIMED_OUT" = "1" ]; then
+  # Стенд, п.4: таймаут -> сразу откат, без попытки "подлатать" через
+  # guest agent. Зависший на госте процесс не гарантирует, что его
+  # finally (rescue.ps1) вообще выполнился, даже если сеть на вид цела —
+  # доверять частичному восстановлению здесь неверно, откатываем сразу.
+  log "Таймаут сценария — откатываюсь на $SNAP без попытки rescue.ps1"
+  sudo virsh snapshot-revert "$VM_NAME" "$SNAP" --running 2>>"$HOSTLOG" \
+    || sudo virsh snapshot-revert "$VM_NAME" "$SNAP" 2>>"$HOSTLOG"
+  echo "RESULT: BROKE_VM (timeout)" >> "$HOSTLOG"
+  log "RESULT: BROKE_VM (timeout) — см. $HOSTLOG"
+  exit 1
+elif [ "$SSH_OK" = "1" ] && check_net; then
   log "Связь в порядке."
 else
   # --- 5. нет связи -> rescue.ps1 через guest agent (без сети) ---
