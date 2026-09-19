@@ -35,17 +35,45 @@ public sealed class TunnelManager : IAsyncDisposable
     private int _tunIfIndex;
     private int _physicalIfIndex;
     private IPAddress? _physicalGateway;
-    private CancellationTokenSource? _debounceCts;
-    private readonly Lock _gatewayLock = new();
+    private WindowsConfigOptions? _winOptions;
+
+    // Ревью п.13-14: раньше каждое событие смены сети запускало свой
+    // Task.Run с собственным CancellationTokenSource, который отменялся
+    // следующим событием — при буре событий (реконнект Wi-Fi, выход из
+    // сна, переключение Wi-Fi/Ethernet — это секунды потока событий)
+    // пересчёт мог не выполниться НИ РАЗУ, а окно подавления ниже,
+    // самопродлеваясь на каждый удачный пересчёт, гарантированно душило
+    // и следующее настоящее событие. Плюс токен отмены не был связан со
+    // StopAsync — уже проснувшийся пересчёт мог добавить хост-маршрут
+    // ПОСЛЕ того, как StopAsync его снял.
+    //
+    // Теперь — один последовательный воркер: события только сигнализируют
+    // "есть работа" (семафор ёмкостью 1 — лишние сигналы схлопываются, это
+    // и есть дебаунс), обрабатывает их одна задача с токеном, привязанным
+    // к жизни туннеля, а StopAsync эту задачу ДОЖИДАЕТСЯ (не просто
+    // отменяет), поэтому не может наложиться на собственное снятие
+    // маршрутов. Плюс сам воркер, если событий давно не было, будит себя
+    // по таймауту и делает полную идемпотентную сверку сети независимо от
+    // того, дошло ли вообще уведомление (план, 3.9) — потерянное событие
+    // перестаёт быть катастрофой.
+    private readonly SemaphoreSlim _networkChangeSignal = new(0, 1);
+    private CancellationTokenSource? _watchCts;
+    private Task? _watchWorkerTask;
+
+    private static readonly TimeSpan ReconcileInterval = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan DebounceQuiet = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan DebounceMax = TimeSpan.FromSeconds(5);
 
     // Добавление/удаление НАШИХ ЖЕ маршрутов и адресов само порождает
     // события NotifyRouteChange2/NotifyIpInterfaceChange (это подтверждено
-    // живым тестом на стенде: без этой защиты RecomputeHostRoute реагировал
-    // на собственные изменения и зацикливался, в итоге перекидывая
+    // живым тестом на стенде: без этой защиты пересчёт реагировал на
+    // собственные изменения и зацикливался, в итоге перекидывая
     // хост-маршрут до сервера через сам TUN — ту самую петлю, от которой
-    // этот маршрут должен защищать). Поэтому реакция на смену сети
+    // этот маршрут должен защищать). Поэтому реакция на СОБЫТИЕ смены сети
     // подавляется на короткое окно после любой нашей собственной мутации
-    // таблицы маршрутов/адресов.
+    // таблицы маршрутов/адресов — но это фильтр эха ВНУТРИ воркера
+    // (см. NetworkWatchWorkerAsync), а не причина пропустить периодическую
+    // сверку: та выполняется по таймауту независимо от этого окна.
     private DateTime _suppressNetworkChangeUntilUtc = DateTime.MinValue;
 
     private void MarkSelfMutation() => _suppressNetworkChangeUntilUtc = DateTime.UtcNow.AddSeconds(2);
@@ -102,6 +130,7 @@ public sealed class TunnelManager : IAsyncDisposable
             ServerAddressOverride = _serverIp.ToString(),
         };
         var winOptions = CloneWithOutbound(_options, outboundOptions);
+        _winOptions = winOptions;
         var config = ConfigBuilder.BuildConfig(link, winOptions);
         await File.WriteAllTextAsync(_configPath, config.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ct);
         _log($"config.json записан: {_configPath}");
@@ -182,9 +211,12 @@ public sealed class TunnelManager : IAsyncDisposable
         }
 
         // 8. Слежение за сменой сети (Wi-Fi/кабель/сон) — пересчитать шлюз,
-        // переставить хост-маршрут (план, 3.2, абзац после шага 8).
+        // переставить хост-маршрут (план, 3.2, абзац после шага 8), плюс
+        // периодическая сверка (план, 3.9).
         _watcher = new RouteWatcher();
         _watcher.NetworkChanged += OnNetworkChanged;
+        _watchCts = new CancellationTokenSource();
+        _watchWorkerTask = NetworkWatchWorkerAsync(_watchCts.Token);
 
         // 8'. Kill-switch (3.3) — последним, чтобы при остановке снимался
         // первым (строго обратный порядок): пока он есть, "молчаливая
@@ -342,51 +374,139 @@ public sealed class TunnelManager : IAsyncDisposable
 
     /// <summary>
     /// Реакция на NotifyRouteChange2/NotifyIpInterfaceChange (план, 3.2:
-    /// смена Wi-Fi, переподключение кабеля, сон). Колбэк стреляет на
-    /// потоке ОС и может быть шумным — дебаунс на 1 секунду, плюс сама
-    /// пауза перед пересчётом: спайк (docs/spike.md) показал, что Windows
-    /// не мгновенно применяет смену маршрутов к forwarding engine.
+    /// смена Wi-Fi, переподключение кабеля, сон). Колбэк стреляет на потоке
+    /// ОС и может быть шумным — здесь только сигнал воркеру (см.
+    /// NetworkWatchWorkerAsync), сама обработка (дебаунс, пересчёт) — там.
     /// </summary>
     private void OnNetworkChanged()
     {
-        lock (_gatewayLock)
+        try { _networkChangeSignal.Release(); }
+        catch (SemaphoreFullException)
         {
-            _debounceCts?.Cancel();
-            var cts = new CancellationTokenSource();
-            _debounceCts = cts;
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(1), cts.Token);
-                    RecomputeHostRoute();
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception ex)
-                {
-                    _log($"Пересчёт хост-маршрута после смены сети упал: {ex.Message}");
-                }
-            }, cts.Token);
+            // Необработанный сигнал уже есть в очереди — воркер и так
+            // сделает сверку, как только до неё дойдёт. Семафор ёмкостью 1
+            // и есть дебаунс: лишние события схлопываются в один прогон.
         }
     }
 
-    private void RecomputeHostRoute()
+    /// <summary>
+    /// Единственный потребитель сигналов о смене сети (см. комментарий у
+    /// <see cref="_networkChangeSignal"/> — почему один воркер вместо
+    /// Task.Run на событие). Просыпается либо по сигналу (переждав бурю
+    /// событий, но не дольше <see cref="DebounceMax"/>), либо по таймауту
+    /// <see cref="ReconcileInterval"/> — и тогда делает полную сверку
+    /// независимо от того, было ли вообще событие (план, 3.9).
+    /// </summary>
+    private async Task NetworkWatchWorkerAsync(CancellationToken ct)
     {
-        if (_serverIp is null) return;
-        if (DateTime.UtcNow < _suppressNetworkChangeUntilUtc)
+        while (true)
         {
-            // Эхо нашей же недавней мутации таблицы маршрутов (см. комментарий
-            // у _suppressNetworkChangeUntilUtc) — не настоящая смена сети.
-            return;
+            bool gotSignal;
+            try
+            {
+                gotSignal = await _networkChangeSignal.WaitAsync(ReconcileInterval, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (gotSignal)
+            {
+                try
+                {
+                    var deadline = DateTime.UtcNow + DebounceMax;
+                    while (DateTime.UtcNow < deadline)
+                    {
+                        // Спайк (docs/spike.md) показал, что Windows не
+                        // мгновенно применяет смену маршрутов к forwarding
+                        // engine — короткая пауза тишины перед пересчётом.
+                        // Но НЕ бесконечно: буря событий без пауз иначе
+                        // может не дать сверке случиться ни разу (п.13).
+                        if (!await _networkChangeSignal.WaitAsync(DebounceQuiet, ct)) break;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                if (DateTime.UtcNow < _suppressNetworkChangeUntilUtc)
+                {
+                    // Эхо нашей же недавней мутации таблицы маршрутов (см.
+                    // комментарий у _suppressNetworkChangeUntilUtc) — не
+                    // настоящая смена сети. Пропускаем ТОЛЬКО этот прогон,
+                    // не саму сверку вообще: ближайший таймаут или следующее
+                    // событие её всё равно выполнят.
+                    continue;
+                }
+            }
+
+            try
+            {
+                await ReconcileNetworkStateAsync();
+            }
+            catch (Exception ex)
+            {
+                _log($"Сверка сетевого состояния упала: {ex.Message}");
+            }
         }
+    }
+
+    /// <summary>
+    /// Полная идемпотентная сверка (план, 3.9: "после сна и гибернации —
+    /// полная проверка маршрутов и адаптера, не только по уведомлениям").
+    /// Каждая проверка сама решает, чинить ли что-то — безопасно звать на
+    /// каждый тик таймера, даже если ничего не изменилось.
+    /// </summary>
+    private async Task ReconcileNetworkStateAsync()
+    {
+        if (_serverIp is null || _winOptions is null) return;
+
+        ReconcileHostRoute();
+
+        // Если xray.exe умер сам по себе (не через StopAsync), TUN-адаптер
+        // исчезает вместе с ним, а _tunIfIndex остаётся указывать на уже
+        // несуществующий интерфейс. Починить тут всё равно нечего: адаптер
+        // возвращает только сам xray.exe при следующем on. Живым тестом на
+        // стенде (kill xray.exe, ждать несколько циклов сверки) подтверждено:
+        // ни краха, ни шторма повторов, ни утечки хост-маршрута — тот
+        // продолжает поддерживаться независимо от TUN (см. ReconcileHostRoute
+        // выше). Отдельную проверку "жив ли адаптер" заводить не стали:
+        // NetworkInterface.GetAllNetworkInterfaces() и
+        // ConvertInterfaceIndexToLuid — оба того же живого теста показали
+        // ложное "жив" для уже погибшего ifIndex (отстают/не считают это
+        // ошибкой), а вот сами Create*Entry2 на мёртвый ifIndex либо честно
+        // проваливаются (тогда лови catch ниже), либо, судя по отсутствию
+        // и исключений, и повторных попыток в логе, Windows принимает
+        // запись без валидации интерфейса — в обоих случаях безопасно.
+        try
+        {
+            ReconcileSplitDefaultRoutes();
+            ReconcileTunAddresses();
+            await ReconcileTunDnsAsync();
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            _log($"Сверка TUN-состояния упала (адаптер {_winOptions.TunAdapterName} мог исчезнуть вместе с xray.exe) — {ex.Message}");
+        }
+    }
+
+    private void ReconcileHostRoute()
+    {
         var oldGateway = _physicalGateway!;
         var oldIfIndex = _physicalIfIndex;
 
         // Снять старый хост-маршрут ПЕРЕД пересчётом — иначе GetBestRoute2
         // увидит наш же (возможно, уже неверный) маршрут и вернёт его снова.
+        // Делается безусловно на каждый прогон (не только когда что-то
+        // видимо изменилось) — иначе застарелый, но всё ещё физически
+        // присутствующий маршрут маскировал бы от GetBestRoute2 реальную
+        // смену шлюза на том же интерфейсе (например, DHCP выдал новый
+        // шлюз без смены ifIndex).
         RemoveHostRoute(oldGateway, oldIfIndex);
 
-        var (newGateway, newIfIndex) = RouteManager.GetBestGateway(_serverIp);
+        var (newGateway, newIfIndex) = RouteManager.GetBestGateway(_serverIp!);
 
         // Жёсткий инвариант, а не только тайминг: анти-петлевой хост-маршрут
         // НИКОГДА не должен указывать на сам TUN — живым тестом на стенде
@@ -412,14 +532,107 @@ public sealed class TunnelManager : IAsyncDisposable
             _log($"Сеть сменилась: шлюз {oldGateway}(if={oldIfIndex}) -> {_physicalGateway}(if={_physicalIfIndex})");
     }
 
-    public Task StopAsync()
+    /// <summary>
+    /// /1-маршруты в TUN — проверка через пробный адрес из каждой половины
+    /// (GetBestRoute2 читает только локальную таблицу, пакет никуда не
+    /// уходит). Адреса пробников намеренно не 127.0.0.0/8 — тот входит в
+    /// 0.0.0.0/1, но у loopback всегда отдельный, более специфичный
+    /// маршрут, не через TUN.
+    /// </summary>
+    private void ReconcileSplitDefaultRoutes()
     {
-        _debounceCts?.Cancel();
+        CheckSplitHalf(IPAddress.Parse("1.0.0.0"), IPAddress.Parse("0.0.0.0"));
+        CheckSplitHalf(IPAddress.Parse("129.0.0.0"), IPAddress.Parse("128.0.0.0"));
+        if (_winOptions!.TunAddressV6 is not null)
+        {
+            CheckSplitHalf(IPAddress.Parse("1::"), IPAddress.Parse("::"));
+            CheckSplitHalf(IPAddress.Parse("8001::"), IPAddress.Parse("8000::"));
+        }
+    }
+
+    private void CheckSplitHalf(IPAddress probe, IPAddress network)
+    {
+        var (_, ifIndex) = RouteManager.GetBestGateway(probe);
+        if (ifIndex == _tunIfIndex) return; // маршрут на месте
+
+        _log($"Сверка: /1-маршрут {network}/1 через TUN пропал — восстанавливаю");
+        TrySafe(() => RouteManager.RemoveRoute(network, 1, null, _tunIfIndex), $"снятие возможного осиротевшего {network}/1 перед восстановлением");
+        WithRetry(() => RouteManager.AddRoute(network, 1, nextHop: null, _tunIfIndex, metric: 0));
+    }
+
+    /// <summary>Адрес(а) TUN-адаптера — сверка через System.Net.NetworkInformation
+    /// (только чтение, без нового P/Invoke).</summary>
+    private void ReconcileTunAddresses()
+    {
+        var nic = NetworkInterface.GetAllNetworkInterfaces()
+            .FirstOrDefault(n => string.Equals(n.Name, _winOptions!.TunAdapterName, StringComparison.OrdinalIgnoreCase));
+        if (nic is null) return; // адаптера целиком нет — не забота сверки, xray сам такое не переживёт
+
+        var unicast = nic.GetIPProperties().UnicastAddresses;
+
+        var (v4Addr, v4Prefix) = CidrUtil.Parse(_winOptions!.TunAddressV4);
+        if (!unicast.Any(a => a.Address.Equals(v4Addr)))
+        {
+            _log($"Сверка: адрес TUN {v4Addr}/{v4Prefix} пропал — восстанавливаю");
+            TrySafe(() => RouteManager.AddAddress(v4Addr, v4Prefix, _tunIfIndex), "восстановление TUN IPv4-адреса");
+        }
+
+        if (_winOptions.TunAddressV6 is { Length: > 0 } v6Cidr)
+        {
+            var (v6Addr, v6Prefix) = CidrUtil.Parse(v6Cidr);
+            if (!unicast.Any(a => a.Address.Equals(v6Addr)))
+            {
+                _log($"Сверка: адрес TUN {v6Addr}/{v6Prefix} пропал — восстанавливаю");
+                TrySafe(() => RouteManager.AddAddress(v6Addr, v6Prefix, _tunIfIndex), "восстановление TUN IPv6-адреса");
+            }
+        }
+    }
+
+    /// <summary>DNS-серверы TUN-адаптера — сверка тем же способом, что и
+    /// назначение (netsh, см. SetTunDnsAsync).</summary>
+    private async Task ReconcileTunDnsAsync()
+    {
+        if (_winOptions!.DnsServers.Length == 0) return;
+
+        var nic = NetworkInterface.GetAllNetworkInterfaces()
+            .FirstOrDefault(n => string.Equals(n.Name, _winOptions.TunAdapterName, StringComparison.OrdinalIgnoreCase));
+        if (nic is null) return;
+
+        var current = nic.GetIPProperties().DnsAddresses.Select(a => a.ToString()).ToList();
+        if (current.SequenceEqual(_winOptions.DnsServers)) return;
+
+        _log($"Сверка: DNS TUN-адаптера разошёлся (было [{string.Join(", ", current)}], нужно [{string.Join(", ", _winOptions.DnsServers)}]) — переустанавливаю");
+        await SetTunDnsAsync(_winOptions.TunAdapterName, _winOptions.DnsServers);
+    }
+
+    public async Task StopAsync()
+    {
         if (_watcher is not null)
         {
             _watcher.NetworkChanged -= OnNetworkChanged;
             _watcher.Dispose();
             _watcher = null;
+        }
+
+        // Ревью п.14: раньше здесь только отменялся _debounceCts, а уже
+        // проснувшийся пересчёт (токен внутрь него не передавался) ничем
+        // не останавливался и мог добавить хост-маршрут ПОСЛЕ того, как
+        // строка ниже его сняла — маршрут оставался висеть. Теперь
+        // ДОЖИДАЕМСЯ завершения воркера (а не просто отменяем сигнал) —
+        // после await ниже он гарантированно не выполняет и не начнёт
+        // выполнять пересчёт, поэтому RemoveHostRoute дальше не может
+        // наложиться на его же AddHostRoute.
+        if (_watchCts is not null)
+        {
+            _watchCts.Cancel();
+            if (_watchWorkerTask is not null)
+            {
+                try { await _watchWorkerTask; }
+                catch (Exception ex) { _log($"Ожидание воркера слежения за сетью упало: {ex.Message}"); }
+            }
+            _watchCts.Dispose();
+            _watchCts = null;
+            _watchWorkerTask = null;
         }
 
         if (_serverIp is not null && _physicalGateway is not null)
@@ -441,8 +654,6 @@ public sealed class TunnelManager : IAsyncDisposable
         _job?.Dispose();
         _job = null;
         _xrayProcess = null;
-
-        return Task.CompletedTask;
     }
 
     private void TryKillXray()
