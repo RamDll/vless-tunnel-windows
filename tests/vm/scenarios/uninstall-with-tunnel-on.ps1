@@ -20,10 +20,24 @@
 #      разница только в MsgBox/диалогах — здесь прогоняем /VERYSILENT,
 #      т.к. интерактивный мастер в headless-автоматизации некем "кликать")
 #   2. удаление при уже остановленной службе — не должно падать
-#   3. удаление при включённом туннеле и НАМЕРЕННО зависшей остановке
-#      (NtSuspendProcess замораживает ВСЕ потоки процесса службы — то же
-#      самое, что видит WaitForServiceStopped при реально зависшей
-#      службе) — маршруты и фильтры всё равно должны быть сняты doctor'ом.
+#   3. туннель включён, процесс службы АБРУПТНО убит (Stop-Process -Force,
+#      БЕЗ штатного off/OnStop) прямо перед удалением — имитирует "службу
+#      убили/она упала" без графической остановки вообще: маршруты и
+#      фильтры остаются осиротевшими точно так же, как при реально
+#      зависшей и потом прибитой сборщиком мусора ОС службе, и всё равно
+#      должны быть сняты doctor'ом.
+#
+#      ПЕРВАЯ версия этого сценария замораживала весь процесс службы
+#      через NtSuspendProcess (все потоки), чтобы дословно воспроизвести
+#      таймаут WaitForServiceStopped — живым прогоном (дважды, независимо
+#      друг от друга) поймано, что это вешает сетевой стек ВСЕЙ гостевой
+#      машины (видимо, замороженный поток держит блокировку ядра
+#      WFP/wintun) настолько, что даже guest agent не восстанавливает
+#      связь и with-rescue.sh откатывает VM на снимок. Ветка "не
+#      остановилась за 30с -> Log()/MsgBox" (installer/vless-tunnel.iss)
+#      поэтому проверена ТОЛЬКО код-ревью (тот же гейт UninstallSilent(),
+#      что уже живьём проверен для другого MsgBox в этом же файле), не
+#      живым тестом — риск повторной поломки стенда не окупается.
 #
 # Дот-сорсится из run-test.ps1 — Add-Step/Invoke-VtIpc уже в scope.
 
@@ -65,6 +79,22 @@ function Test-NoOwnWfpFilters {
     $hasProvider = $content -match '64291c58-52b0-4fae-8d47-8af2cbec87c3'
     $hasSublayer = $content -match 'f5e23d33-098e-444a-a312-7b190a764453'
     return (-not $hasProvider) -and (-not $hasSublayer)
+}
+
+function Wait-PathGone {
+    # unins000.exe не может удалить сам себя, пока выполняется — самоудаление
+    # идёт через отдельный процесс-помощник, запускаемый ПОСЛЕ выхода
+    # основного процесса, с небольшой задержкой. Фиксированного Start-Sleep
+    # оказалось недостаточно (живым тестом дважды поймана гонка: папка
+    # установки ещё на месте сразу после Start-Process -Wait) — опрос с
+    # запасом по времени вместо гадания с константой.
+    param([string]$Path, [int]$TimeoutSec = 20)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-Path $Path)) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return -not (Test-Path $Path)
 }
 
 function Test-NoSplitRoutes {
@@ -124,8 +154,8 @@ if ($onResp.Ok) {
     $svcGone = -not (Get-Service -Name 'vless-tunnel' -ErrorAction SilentlyContinue)
     Add-Step -Step 'scenario1: service unregistered' -Expected $true -Actual $svcGone -Pass $svcGone
 
-    $appGone = -not (Test-Path $installDir)
-    Add-Step -Step 'scenario1: install dir fully removed' -Expected $true -Actual $appGone -Pass $appGone
+    $appGone = Wait-PathGone $installDir 20
+    Add-Step -Step 'scenario1: install dir fully removed (polled up to 20s)' -Expected $true -Actual $appGone -Pass $appGone
 } else {
     Get-Process -Name 'VlessTunnel.Tray' -ErrorAction SilentlyContinue | Stop-Process -Force
     if (Test-Path $uninst) { Start-Process $uninst -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait }
@@ -144,62 +174,45 @@ Add-Step -Step 'scenario2: uninstall with already-stopped service exit code' -Ex
 $svc2Gone = -not (Get-Service -Name 'vless-tunnel' -ErrorAction SilentlyContinue)
 Add-Step -Step 'scenario2: service unregistered' -Expected $true -Actual $svc2Gone -Pass $svc2Gone
 
-# === Сценарий 3: включённый туннель + намеренно зависшая остановка службы ===
-Add-Type -Namespace VtTest -Name ProcCtl -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("ntdll.dll")]
-public static extern uint NtSuspendProcess(IntPtr processHandle);
-[System.Runtime.InteropServices.DllImport("ntdll.dll")]
-public static extern uint NtResumeProcess(IntPtr processHandle);
-'@
-
+# === Сценарий 3: туннель включён, процесс службы убит абруптно (без off/OnStop) ===
 Install-Fresh | Out-Null
 $onResp3 = Start-TunnelOn
-Add-Step -Step 'scenario3: tunnel on before hung-stop uninstall' -Expected $true -Actual ([bool]$onResp3.Ok) -Pass ([bool]$onResp3.Ok) -Info $onResp3.Error
+Add-Step -Step 'scenario3: tunnel on before abrupt-kill uninstall' -Expected $true -Actual ([bool]$onResp3.Ok) -Pass ([bool]$onResp3.Ok) -Info $onResp3.Error
 $serverHost3 = $onResp3.Status.ServerHost
 
 if ($onResp3.Ok) {
     $svcProc = Get-Process -Name 'VlessTunnel.Service' -ErrorAction SilentlyContinue
-    $suspended = $false
+    $killed = $false
     if ($svcProc) {
-        [VtTest.ProcCtl]::NtSuspendProcess($svcProc.Handle) | Out-Null
-        $suspended = $true
+        Stop-Process -Id $svcProc.Id -Force
+        $killed = $true
     }
-    Add-Step -Step 'scenario3: service process suspended for test' -Expected $true -Actual $suspended -Pass $suspended
-
-    $uninstLog = 'C:\dev\logs\uninstall-hung.log'
-    Remove-Item $uninstLog -Force -ErrorAction SilentlyContinue
-    # off (до 90с своего IPC-таймаута, служба заморожена — не ответит) +
-    # sc stop + WaitForServiceStopped (30с) + doctor + sc delete — с запасом.
-    $p3 = Start-Process $uninst -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$uninstLog" -PassThru
-    $finished = $p3.WaitForExit(240000)
-
-    if ($svcProc -and -not $svcProc.HasExited) {
-        [VtTest.ProcCtl]::NtResumeProcess($svcProc.Handle) | Out-Null
-    }
-    if (-not $finished) { try { $p3.WaitForExit(30000) | Out-Null } catch {} }
-
-    Add-Step -Step 'scenario3: uninstall (with suspended service) finished' -Expected $true -Actual ($finished -or $p3.HasExited) -Pass ($finished -or $p3.HasExited)
-
-    $logContent = if (Test-Path $uninstLog) { Get-Content $uninstLog -Raw } else { '' }
-    $loggedTimeout = $logContent -match 'не остановилась'
-    Add-Step -Step 'scenario3: stop timeout recorded via Log() in .iss' -Expected $true -Actual $loggedTimeout -Pass $loggedTimeout
-
+    Add-Step -Step 'scenario3: service process killed abruptly (no graceful off/OnStop)' -Expected $true -Actual $killed -Pass $killed
     Start-Sleep -Seconds 2
-    if ($svcProc -and -not $svcProc.HasExited) { Stop-Process -Id $svcProc.Id -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Seconds 2
+
+    # Процесс мёртв, но служба ЗАРЕГИСТРИРОВАНА (sc delete ещё не звали) —
+    # SCM увидит её как остановленную (не запущенную), sc stop/off пройдут
+    # быстро и без эффекта (маршруты/фильтры физически некому снимать,
+    # процесс уже мёртв) — ключевая проверка теста: doctor всё равно
+    # снимает то, что абруптно убитый процесс не успел снять сам.
+    $uninstExit3 = (Start-Process $uninst -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru).ExitCode
+    Start-Sleep -Seconds 3
+    Add-Step -Step 'scenario3: uninstall after abrupt kill exit code' -Expected 0 -Actual $uninstExit3 -Pass ($uninstExit3 -eq 0)
 
     $hostRouteGone3 = -not (Get-NetRoute -DestinationPrefix "$serverHost3/32" -ErrorAction SilentlyContinue)
-    Add-Step -Step 'scenario3: host route gone despite hung stop' -Expected $true -Actual $hostRouteGone3 -Pass $hostRouteGone3
+    Add-Step -Step 'scenario3: host route gone despite abrupt kill' -Expected $true -Actual $hostRouteGone3 -Pass $hostRouteGone3
 
     $splitGone3 = Test-NoSplitRoutes
-    Add-Step -Step 'scenario3: split /1 routes gone despite hung stop' -Expected $true -Actual $splitGone3 -Pass $splitGone3
+    Add-Step -Step 'scenario3: split /1 routes gone despite abrupt kill' -Expected $true -Actual $splitGone3 -Pass $splitGone3
 
     $noFilters3 = Test-NoOwnWfpFilters
-    Add-Step -Step 'scenario3: no own WFP filters left despite hung stop' -Expected $true -Actual $noFilters3 -Pass ([bool]$noFilters3)
+    Add-Step -Step 'scenario3: no own WFP filters left despite abrupt kill' -Expected $true -Actual $noFilters3 -Pass ([bool]$noFilters3)
 
-    # Уборка стенда — не влияет на PASS/FAIL выше, только чтобы следующий
-    # прогон сценария стартовал с чистого состояния (зависший процесс мог
-    # не дать sc delete снести регистрацию вовремя).
+    $svc3Gone = -not (Get-Service -Name 'vless-tunnel' -ErrorAction SilentlyContinue)
+    Add-Step -Step 'scenario3: service unregistered' -Expected $true -Actual $svc3Gone -Pass $svc3Gone
+
+    # Уборка стенда — не влияет на PASS/FAIL выше, только на случай, если
+    # что-то из вышеперечисленного не подчистило всё до конца.
     Get-Process -Name 'VlessTunnel.Service' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     sc.exe delete vless-tunnel | Out-Null
     if (Test-Path $uninst) {
