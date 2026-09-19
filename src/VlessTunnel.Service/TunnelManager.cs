@@ -906,6 +906,32 @@ public sealed class TunnelManager : IAsyncDisposable
         throw new TimeoutException($"Адаптер \"{adapterName}\" не поднялся за {timeout}");
     }
 
+    // Ревью п.21: жёсткий Kill() у предыдущего xray.exe (см. TryKillXray)
+    // не даёт ему штатно закрыть сессию wintun — коллизия "file already
+    // exists" при пересоздании адаптера С ТЕМ ЖЕ ИМЕНЕМ изредка возникает
+    // (~треть циклов в живом тесте), и лечится повтором всего запуска
+    // (LaunchXrayAndWaitForAdapterAsync), но это лечит симптом (~19с вместо
+    // ~1с), не причину. Настоящее грациозное завершение (CTRL_BREAK перед
+    // Kill()) потребовало бы обходить Process.Start целиком — CreateNoWindow
+    // означает, что у xray.exe вообще НЕТ консоли (не "скрытая", а именно
+    // никакой), а без своей консоли/process group к нему не подсоединиться
+    // и не отправить консольное событие, не рискуя задеть саму службу,
+    // делящую то же самое; плюс неизвестно, отреагирует ли рантайм Go
+    // внутри xray-core на такой сигнал штатным закрытием wintun вообще —
+    // непроверяемое допущение поверх рискованной переделки самого запуска
+    // процесса. Альтернатива из того же ревью (чередовать имя адаптера)
+    // устраняет коллизию МЕХАНИЧЕСКИ, без каких-либо ставок на поведение
+    // xray-core: если предыдущий адаптер того же имени ещё не до конца
+    // освобождён, новый с ДРУГИМ именем просто не с чем сталкиваться.
+    // Статическое поле — переживает пересоздание TunnelManager между
+    // on/off (TunnelController создаёт новый экземпляр на каждый on).
+    private static int _tunAdapterNameGeneration;
+
+    private static string ChooseTunAdapterName(string configuredName) =>
+        System.Threading.Interlocked.Increment(ref _tunAdapterNameGeneration) % 2 == 0
+            ? configuredName
+            : configuredName + "b";
+
     private static WindowsConfigOptions CloneWithOutbound(WindowsConfigOptions o, BuildOptions outbound) => new()
     {
         Outbound = outbound,
@@ -919,7 +945,7 @@ public sealed class TunnelManager : IAsyncDisposable
         TunAddressV6 = o.TunAddressV6,
         Mtu = o.Mtu,
         TunStack = o.TunStack,
-        TunAdapterName = o.TunAdapterName,
+        TunAdapterName = ChooseTunAdapterName(o.TunAdapterName),
     };
 
     public async ValueTask DisposeAsync() => await StopAsync();

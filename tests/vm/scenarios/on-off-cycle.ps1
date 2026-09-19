@@ -29,7 +29,11 @@ if (-not (Test-Path 'C:\ProgramData\vless-tunnel\link.txt')) {
 }
 
 # ifIndex xray0 бывает переиспользован ОС между поднятиями, поэтому имя
-# адаптера, не индекс, — надёжный признак "TUN сейчас поднят".
+# адаптера, не индекс, — надёжный признак "TUN сейчас поднят". Ревью
+# п.21: имя чередуется между xray0/xray0b (лечит гонку пересоздания
+# wintun-адаптера), поэтому проверяем оба варианта, не только "xray0".
+function Get-XrayTunAdapter { Get-NetAdapter | Where-Object { $_.Name -eq 'xray0' -or $_.Name -eq 'xray0b' } }
+
 $cycles = 3
 for ($i = 1; $i -le $cycles; $i++) {
     $onResp = $null
@@ -42,7 +46,7 @@ for ($i = 1; $i -le $cycles; $i++) {
     Add-Step -Step "cycle ${i}: on succeeded (attempts=$attempts)" -Expected $true -Actual ([bool]$onResp.Ok) -Pass ([bool]$onResp.Ok) -Info $onResp.Error
 
     if ($onResp.Ok) {
-        $tunIf = Get-NetAdapter -Name 'xray0' -ErrorAction SilentlyContinue
+        $tunIf = Get-XrayTunAdapter
         $serverHost = $onResp.Status.ServerHost
         $hostRoute = if ($serverHost) { Get-NetRoute -DestinationPrefix "$serverHost/32" -ErrorAction SilentlyContinue } else { $null }
         $hostRouteOk = $hostRoute -and $tunIf -and ($hostRoute.InterfaceIndex -ne $tunIf.InterfaceIndex)
@@ -54,7 +58,7 @@ for ($i = 1; $i -le $cycles; $i++) {
     $offResp = Invoke-VtIpc -Cmd 'off'
     Add-Step -Step "cycle ${i}: off succeeded" -Expected $true -Actual ([bool]$offResp.Ok) -Pass ([bool]$offResp.Ok) -Info $offResp.Error
 
-    $leftoverTun = Get-NetAdapter -Name 'xray0' -ErrorAction SilentlyContinue
+    $leftoverTun = Get-XrayTunAdapter
     Add-Step -Step "cycle ${i}: TUN adapter gone after off" -Expected 'absent' `
         -Actual $(if ($leftoverTun) { 'present' } else { 'absent' }) -Pass (-not $leftoverTun)
 }
