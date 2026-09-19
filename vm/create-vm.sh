@@ -50,6 +50,18 @@ fi
 
 mkdir -p "$VMDIR"
 
+# Стенд, п.1: управляющая сеть vt-mgmt (host-only, отдельная от "default",
+# см. vm/vt-mgmt-network.xml) — SSH держится на ней отдельно от того, что
+# ломают сетевые тесты. Идемпотентно: если уже определена, ничего не делаем.
+if ! sudo virsh net-info vt-mgmt >/dev/null 2>&1; then
+  log "Определяю сеть vt-mgmt"
+  sudo virsh net-define "$SCRIPT_DIR/vt-mgmt-network.xml"
+fi
+# Не парсим локализованный вывод virsh (тот же урок, что с метками sc.exe,
+# см. PLAN-windows.md) — просто пробуем запустить и глотаем "уже активна".
+sudo virsh net-start vt-mgmt >/dev/null 2>&1 || true
+sudo virsh net-autostart vt-mgmt >/dev/null 2>&1 || true
+
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -87,6 +99,7 @@ sudo virt-install \
   --disk path="$VIRTIO_ISO",device=cdrom,bus=sata,readonly=on \
   --disk path="$RESOURCE_ISO",device=cdrom,bus=sata,readonly=on \
   --network network=default,model=e1000e \
+  --network network=vt-mgmt,model=e1000e,mac=52:54:00:89:6c:86 \
   --graphics spice --video qxl --channel spicevmc \
   --channel unix,target_type=virtio,name=org.qemu.guest_agent.0 \
   --os-variant win10 \

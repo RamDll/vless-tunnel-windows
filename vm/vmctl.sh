@@ -11,11 +11,22 @@ KNOWN_HOSTS="$SECDIR/vm_known_hosts"
 SSH_USER="vtadmin"
 VIRSH="sudo virsh"
 
+# Стенд, п.1: SSH идёт по ОТДЕЛЬНОМУ адаптеру "vt-mgmt" (host-only сеть
+# libvirt vt-mgmt, 10.77.77.0/24, без forward — трафик с хоста на гостя
+# и обратно, наружу не NAT'ится). Раньше управляющий канал шёл через тот
+# же "default"-адаптер, что и сами сетевые тесты (kill-switch, дёрганье
+# маршрутов, reboot) — то, что SSH переживал это, было случайностью
+# устройства WFP (фильтры только на исходящие соединения), не гарантией.
+# IP статический через DHCP-резервацию по MAC в vt-mgmt (см. vm/create-vm.sh) —
+# не через domifaddr на "default", который тесты как раз и ломают.
+MGMT_IP="10.77.77.5"
+
 usage() {
   cat >&2 <<EOF
 Использование: $(basename "$0") <команда> [аргументы]
 
-  ip                          IP-адрес виртуалки
+  ip                          управляющий IP виртуалки (сеть vt-mgmt)
+  test-ip                     IP виртуалки в тестируемой сети (default) — только для чтения/диагностики, НЕ для SSH
   status                      состояние домена + guest agent + (если есть IP) SSH
   ssh [команда...]            SSH внутрь виртуалки (интерактивно без аргументов)
   scp <src> <dst>             копирование через SSH (используйте vt-win10: как хост в пути)
@@ -28,13 +39,17 @@ EOF
   exit 2
 }
 
-ip_of() {
+ip_of() { echo "$MGMT_IP"; }
+
+# Тестируемая сеть (default, NAT) — то, что ломают сетевые тесты. Только
+# для диагностики со стороны хоста (например, сверить с тем, что видит
+# сам тест внутри гостя); SSH/SCP сюда НЕ ходят.
+TEST_NIC_MAC="52:54:00:89:6c:85"
+
+test_ip_of() {
   local ip
-  ip="$($VIRSH domifaddr "$VM_NAME" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1)"
-  if [ -z "$ip" ]; then
-    ip="$($VIRSH domifaddr "$VM_NAME" --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1)"
-  fi
-  [ -n "$ip" ] || { echo "Не удалось определить IP $VM_NAME (домен запущен? guest agent отвечает?)" >&2; return 1; }
+  ip="$($VIRSH domifaddr "$VM_NAME" 2>/dev/null | awk -v mac="$TEST_NIC_MAC" 'tolower($2)==mac{print $4}' | cut -d/ -f1 | head -1)"
+  [ -n "$ip" ] || { echo "Не удалось определить тестовый IP $VM_NAME" >&2; return 1; }
   echo "$ip"
 }
 
@@ -103,6 +118,7 @@ shift || true
 
 case "$cmd" in
   ip) ip_of ;;
+  test-ip) test_ip_of ;;
   status) do_status ;;
   ssh) do_ssh "$@" ;;
   scp) [ $# -eq 2 ] || usage; do_scp "$1" "$2" ;;

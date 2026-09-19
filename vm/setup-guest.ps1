@@ -72,6 +72,40 @@ Step 'OpenSSH Server' {
         -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 }
 
+# Стенд, п.1: SSH — только по отдельному управляющему адаптеру (vt-mgmt,
+# host-only libvirt-сеть, статический IP по DHCP-резервации в vm/create-vm.sh).
+# Раньше SSH шёл по тому же адаптеру, что и сами сетевые тесты (kill-switch,
+# дёрганье маршрутов, reboot) — то, что канал это переживал, было случайностью
+# устройства WFP-фильтров продукта (только ALE_AUTH_CONNECT), не гарантией.
+# Второй адаптер получает IP по DHCP не мгновенно — ждём его перед тем, как
+# трогать sshd_config.
+Step 'Управляющая сеть vt-mgmt: SSH только на ней' {
+    $mgmtMacWindows = ('52:54:00:89:6c:86' -replace ':', '-').ToUpper()
+    $mgmtIp = $null
+    for ($i = 0; $i -lt 30 -and -not $mgmtIp; $i++) {
+        $nic = Get-NetAdapter | Where-Object { $_.MacAddress -eq $mgmtMacWindows }
+        if ($nic) {
+            $addr = Get-NetIPAddress -InterfaceIndex $nic.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($addr) { $mgmtIp = $addr.IPAddress; $mgmtAdapterName = $nic.Name }
+        }
+        if (-not $mgmtIp) { Start-Sleep -Seconds 2 }
+    }
+    if (-not $mgmtIp) { throw "vt-mgmt адаптер (MAC $mgmtMacWindows) не получил IP за отведённое время" }
+    if ($mgmtAdapterName -ne 'vt-mgmt') { Rename-NetAdapter -Name $mgmtAdapterName -NewName 'vt-mgmt' }
+
+    $sshdConfig = 'C:\ProgramData\ssh\sshd_config'
+    $lines = Get-Content $sshdConfig
+    $lines = $lines | Where-Object { $_ -notmatch '^\s*ListenAddress\s' }
+    $insertAt = ($lines | Select-String -Pattern '^#ListenAddress ::' | Select-Object -First 1).LineNumber
+    if ($insertAt) {
+        $newLines = $lines[0..($insertAt - 1)] + "ListenAddress $mgmtIp" + $lines[$insertAt..($lines.Count - 1)]
+    } else {
+        $newLines = @("ListenAddress $mgmtIp") + $lines
+    }
+    Set-Content -Path $sshdConfig -Value $newLines -Encoding ASCII
+    Restart-Service sshd
+}
+
 Step 'SSH-ключ администратора' {
     $keyFile = "$ToolsDir\authorized_key.pub"
     if (-not (Test-Path $keyFile)) { throw "authorized_key.pub not found at $keyFile" }
