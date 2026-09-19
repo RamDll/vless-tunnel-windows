@@ -85,6 +85,16 @@ public sealed class IpcServer
     private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken ct)
     {
         Subscriber? subscriber = null;
+        // Ревью п.16: фикс п.8 закрыл блокировку (Broadcast/TryWrite
+        // никогда не ждёт), но не гонку — DrainSubscriberAsync ниже и цикл
+        // запрос-ответ здесь пишут в ОДИН И ТОТ ЖЕ StreamWriter из двух
+        // разных задач на одном соединении (ровно то, что делает трей:
+        // подписывается и шлёт команды по одному и тому же pipe).
+        // StreamWriter не потокобезопасен — событие и ответ на команду
+        // могли перемешаться в одной строке NDJSON. Один SemaphoreSlim на
+        // оба пути записи для ЭТОГО соединения (не на весь IpcServer —
+        // другие соединения друг другу не мешают и не должны ждать).
+        using var writeLock = new SemaphoreSlim(1, 1);
         try
         {
             using var reader = new StreamReader(pipe);
@@ -95,7 +105,7 @@ public sealed class IpcServer
             {
                 IpcRequest? req;
                 try { req = JsonSerializer.Deserialize<IpcRequest>(line); }
-                catch (JsonException) { await WriteAsync(writer, new IpcResponse { Ok = false, Error = "bad json" }); continue; }
+                catch (JsonException) { await WriteAsync(writer, writeLock, new IpcResponse { Ok = false, Error = "bad json" }); continue; }
                 if (req is null) continue;
 
                 if (req.Cmd == IpcCommands.Subscribe)
@@ -107,13 +117,13 @@ public sealed class IpcServer
                     var queue = Channel.CreateBounded<string>(8);
                     subscriber = new Subscriber(writer, queue, pipe);
                     lock (_subscribersLock) { _subscribers.Add(subscriber); }
-                    _ = DrainSubscriberAsync(subscriber, ct);
-                    await WriteAsync(writer, new IpcResponse { Ok = true, Status = _controller.GetStatus() });
+                    _ = DrainSubscriberAsync(subscriber, writeLock, ct);
+                    await WriteAsync(writer, writeLock, new IpcResponse { Ok = true, Status = _controller.GetStatus() });
                     continue; // клиент остаётся на связи и получает события, но может слать и новые команды
                 }
 
                 var resp = await DispatchAsync(req, ct);
-                await WriteAsync(writer, resp);
+                await WriteAsync(writer, writeLock, resp);
             }
         }
         catch (Exception ex)
@@ -137,15 +147,22 @@ public sealed class IpcServer
     // чем HandleClientAsync это заметил); в обоих случаях просто
     // завершается — Broadcast больше не найдёт этого подписчика в
     // списке при следующей рассылке (или найдёт, но TryWrite в уже
-    // Complete-нутый Channel безопасно вернёт false).
-    private static async Task DrainSubscriberAsync(Subscriber sub, CancellationToken ct)
+    // Complete-нутый Channel безопасно вернёт false). writeLock может
+    // оказаться уже Dispose-нутым (HandleClientAsync завершился раньше,
+    // чем эта задача заметила разрыв) — тогда WaitAsync/Release бросят
+    // ObjectDisposedException, который ловит catch ниже, как и разрыв пайпа.
+    private static async Task DrainSubscriberAsync(Subscriber sub, SemaphoreSlim writeLock, CancellationToken ct)
     {
         try
         {
             await foreach (var ev in sub.Queue.Reader.ReadAllAsync(ct))
-                await sub.Writer.WriteLineAsync(ev);
+            {
+                await writeLock.WaitAsync(ct);
+                try { await sub.Writer.WriteLineAsync(ev); }
+                finally { writeLock.Release(); }
+            }
         }
-        catch { /* пайп разорван или отменено — HandleClientAsync сам подчистит подписку */ }
+        catch { /* пайп разорван, отменено или writeLock уже снят — HandleClientAsync сам подчистит подписку */ }
     }
 
     private async Task<IpcResponse> DispatchAsync(IpcRequest req, CancellationToken ct)
@@ -231,6 +248,10 @@ public sealed class IpcServer
         }
     }
 
-    private static Task WriteAsync(StreamWriter writer, IpcResponse resp) =>
-        writer.WriteLineAsync(JsonSerializer.Serialize(resp));
+    private static async Task WriteAsync(StreamWriter writer, SemaphoreSlim writeLock, IpcResponse resp)
+    {
+        await writeLock.WaitAsync();
+        try { await writer.WriteLineAsync(JsonSerializer.Serialize(resp)); }
+        finally { writeLock.Release(); }
+    }
 }

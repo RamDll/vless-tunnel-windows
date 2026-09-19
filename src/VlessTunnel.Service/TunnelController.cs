@@ -215,9 +215,22 @@ public sealed class TunnelController
             if (_link.Security == "tls" && _link.AllowInsecure)
             {
                 certPin = await CertPinResolver.ResolveAsync(_link.Host, _link.Port, _link.Sni, ct);
-                _log(certPin is not null
-                    ? "allowInsecure: получен отпечаток TLS-сертификата сервера (pinnedPeerCertSha256)"
-                    : "allowInsecure=1 в ссылке, но отпечаток сертификата получить не удалось — соединение может не установиться");
+                if (certPin is null)
+                {
+                    // Ревью п.18: раньше при неудаче (сервер недоступен в
+                    // момент on, таймаут 8с у CertPinResolver) туннель всё
+                    // равно поднимался — ссылка с allowInsecure=1 заведомо
+                    // рассчитана на самоподписанный сертификат, без пина
+                    // xray его не примет, и получалось "молча не работает",
+                    // только со строкой в файле лога, которую пользователь
+                    // не видит. Это должно доезжать до статуса.
+                    const string msg = "allowInsecure=1 в ссылке, но не удалось получить отпечаток TLS-сертификата сервера (сервер недоступен?) — без него самоподписанный сертификат не будет принят";
+                    _log(msg);
+                    _error = msg;
+                    SetState(TunnelState.Error);
+                    throw new InvalidOperationException(msg);
+                }
+                _log("allowInsecure: получен отпечаток TLS-сертификата сервера (pinnedPeerCertSha256)");
             }
 
             _manager = new TunnelManager(new WindowsConfigOptions { Outbound = new BuildOptions { CertPin = certPin } }, _xrayExePath, _configPath, _log, _killSwitch);

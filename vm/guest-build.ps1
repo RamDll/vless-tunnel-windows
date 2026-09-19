@@ -19,6 +19,23 @@ $dotnet = 'C:\dev\dotnet\dotnet.exe'
 $dist = Join-Path $OutDir 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
+# Снести obj/bin ВСЕХ проектов (включая зависимости Core/Native, не
+# только три верхних) перед публикацией — защита от инкрементальной
+# сборки, которая теоретически может не пересобрать изменившийся файл,
+# если git archive проставил ему mtime не новее, чем у уже собранных
+# obj/bin с прошлого прогона на этом же госте. Живым тестом (ревью п.18)
+# был пойман именно такой симптом (собранный .dll не содержал свежий
+# фикс) — но настоящая причина в ТОМ прогоне оказалась куда прозаичнее:
+# фикс просто не был закоммичен, а git archive HEAD (with-rescue.sh)
+# берёт коммит, не рабочее дерево. Инкрементальность здесь ни при чём,
+# но чистка всё равно остаётся дешёвой страховкой от неё на будущее.
+# (dotnet publish не принимает --no-incremental — тот только для
+# dotnet build; чистка obj/bin работает для обоих путей.)
+foreach ($proj in 'Core', 'Native', 'Service', 'Cli', 'Tray') {
+    $projDir = "$SrcDir\src\VlessTunnel.$proj"
+    Remove-Item (Join-Path $projDir 'obj'), (Join-Path $projDir 'bin') -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 foreach ($proj in 'Service', 'Cli', 'Tray') {
     & $dotnet publish "$SrcDir\src\VlessTunnel.$proj\VlessTunnel.$proj.csproj" `
         -c Release -r win-x64 --self-contained true -o $dist "-p:Version=$Version"

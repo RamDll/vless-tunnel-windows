@@ -88,11 +88,15 @@ public sealed class TunnelManager : IAsyncDisposable
     // явно требует именно перезапуск, что проще и переиспользует уже
     // проверенный StartAsync/StopAsync, а не отдельный путь "подменить
     // адрес на лету". Интервал намеренно большой (не секунды/минуты) —
-    // это подстраховка на случай переезда сервера, не поллинг; слишком
-    // частый перерезолв рискует ложно сработать на DNS round-robin
-    // (несколько IP на один хост, каждый ответ — валиден), если сервер
-    // администратора когда-нибудь станет так настроен — известное
-    // ограничение, не защита от него.
+    // это подстраховка на случай переезда сервера, не поллинг.
+    //
+    // Ревью п.17: DNS round-robin (несколько IP на один хост, порядок
+    // ответа меняется от запроса к запросу) раньше ложно срабатывал —
+    // PeriodicReresolveLoopAsync сравнивал ТЕКУЩИЙ IP с ПЕРВЫМ адресом
+    // нового ответа, и при смене порядка получался перезапуск туннеля на
+    // ровном месте каждый цикл. Исправлено: сравнение с ВСЕМ набором
+    // адресов (BootstrapResolver.ResolveSetAsync), перезапуск — только
+    // если текущий IP пропал из набора совсем.
     private static readonly TimeSpan ReresolveInterval = TimeSpan.FromMinutes(10);
 
     /// <summary>Сигнал (не сам перезапуск — TunnelManager не знает, как
@@ -243,22 +247,32 @@ public sealed class TunnelManager : IAsyncDisposable
             while (true)
             {
                 await Task.Delay(ReresolveInterval, ct);
-                IPAddress newIp;
+                IReadOnlyList<IPAddress> newSet;
                 try
                 {
-                    newIp = await BootstrapResolver.ResolveAsync(link, ct);
+                    newSet = await BootstrapResolver.ResolveSetAsync(link, ct);
                 }
                 catch (Exception ex)
                 {
                     _log($"Периодический перерезолв {link.Host} упал (не критично, попробую снова через {ReresolveInterval.TotalMinutes:F0} мин): {ex.Message}");
                     continue;
                 }
-                if (!newIp.Equals(_serverIp))
-                {
-                    _log($"Перерезолв {link.Host}: {_serverIp} -> {newIp}, требуется перезапуск туннеля");
-                    ServerAddressChanged?.Invoke();
-                    return; // дальше пересоздаст TunnelController — эта копия TunnelManager всё равно скоро остановится
-                }
+
+                // Ревью п.17: сравниваем ТЕКУЩИЙ IP с ВСЕМ набором, не с
+                // "первым адресом нового ответа" — DNS round-robin меняет
+                // порядок записей от запроса к запросу, у хоста с
+                // несколькими A-записями сравнение только по первому
+                // адресу перезапускало бы туннель каждый цикл на ровном
+                // месте, даже когда набор адресов сервера не менялся.
+                // Перезапуск нужен, только если ТЕКУЩИЙ адрес пропал из
+                // набора совсем (сервер реально переехал/сменил IP).
+                if (_serverIp is not null && newSet.Contains(_serverIp))
+                    continue;
+
+                var newIp = newSet.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ?? newSet[0];
+                _log($"Перерезолв {link.Host}: {_serverIp} пропал из набора адресов ({string.Join(", ", newSet)}) -> {newIp}, требуется перезапуск туннеля");
+                ServerAddressChanged?.Invoke();
+                return; // дальше пересоздаст TunnelController — эта копия TunnelManager всё равно скоро остановится
             }
         }
         catch (OperationCanceledException) { }

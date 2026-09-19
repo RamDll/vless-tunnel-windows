@@ -15,10 +15,27 @@ public static class BootstrapResolver
     {
         if (link.HostIsIp) return IPAddress.Parse(link.Host);
 
+        var addresses = await ResolveSetAsync(link, ct);
+        return addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) ?? addresses[0];
+    }
+
+    /// <summary>
+    /// Весь набор адресов из ответа резолвера, не только первый (ревью
+    /// п.17) — периодический перерезолв (план, 3.2) сравнивает ТЕКУЩИЙ
+    /// IP с этим набором целиком, а не с "первым адресом нового ответа":
+    /// DNS round-robin меняет порядок записей от запроса к запросу, и
+    /// сравнение только по первому адресу перезапускало бы туннель на
+    /// ровном месте каждый цикл, даже когда набор адресов сервера не
+    /// менялся вовсе.
+    /// </summary>
+    public static async Task<IReadOnlyList<IPAddress>> ResolveSetAsync(ParsedLink link, CancellationToken ct)
+    {
+        if (link.HostIsIp) return [IPAddress.Parse(link.Host)];
+
         var addresses = await Dns.GetHostAddressesAsync(link.Host, ct);
         if (addresses.Length == 0)
             throw new InvalidOperationException($"Bootstrap-резолв не дал ни одного адреса для {link.Host}");
 
-        return addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) ?? addresses[0];
+        return addresses;
     }
 }
