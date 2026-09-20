@@ -286,6 +286,17 @@ begin
     должно случиться ДО копирования в ssInstall, не после. }
   if ServiceExists('{#MyServiceName}') then
   begin
+    // Живой тест пользователя: апгрейд поверх работающей установки
+    // упирался в диалог Inno "Закрытие приложений" (RestartManager не
+    // смог сам закрыть трей) — тот же класс проблемы, что уже решён для
+    // self-update и для удаления (SelfUpdater.CloseRunningTray/команда
+    // "close-tray"), просто путь апгрейда через мастер её не унаследовал.
+    // Закрываем ДО sc stop и до того, как Inno сам начнёт проверять,
+    // какие файлы заняты (та проверка идёт по ssInstall, где мы уже
+    // находимся) — если трей уже закрыт, RestartManager'у нечего просить
+    // закрыть, и диалог не появляется вовсе.
+    Exec(ExpandConstant('{app}\{#MyServiceExeName}'), 'close-tray', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
     Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     // Ревью п.6 — см. комментарий у WaitForServiceStopped выше: без этого
     // копирование файлов чуть ниже (ssInstall) могло начаться раньше, чем

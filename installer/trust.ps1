@@ -51,13 +51,35 @@ if ($cert.Thumbprint -ne $ExpectedThumbprint) {
 
 Write-Host "Отпечаток сертификата подтверждён: $($cert.Thumbprint)"
 
+# Живой тест пользователя: Import-Certificate падал с Access Denied
+# именно на LocalMachine\TrustedPublisher (LocalMachine\Root проходил
+# нормально), несмотря на настоящую, подтверждённую заголовком окна
+# elevation ("Администратор:") — известная особенность самого cmdlet'а
+# (задокументированный класс проблем, TrustedPublisher строже других
+# хранилищ). certutil.exe — тот же инструмент, которым уже снимается
+# сертификат при удалении ([Code] в vless-tunnel.iss, certutil -delstore)
+# — работает надёжно там, где падает Import-Certificate. Раньше ошибка
+# здесь ещё и не была фатальной (скрипт по умолчанию продолжает после
+# необработанного исключения на верхнем уровне .ps1) — ставился
+# НЕДОВЕРЕННЫЙ установщик молча, без единой явной остановки.
 foreach ($store in @('Root', 'TrustedPublisher')) {
     Write-Host "Добавляю сертификат в LocalMachine\$store..."
-    Import-Certificate -FilePath $CertPath -CertStoreLocation "Cert:\LocalMachine\$store" | Out-Null
+    $out = & certutil.exe -f -addstore $store $CertPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Не удалось добавить сертификат в LocalMachine\${store} (certutil, код ${LASTEXITCODE}): $out"
+    }
 }
 
 Write-Host "Снимаю метку «из интернета» с установщика..."
 Unblock-File -Path $InstallerPath
 
 Write-Host "Запускаю установщик..."
-Start-Process -FilePath $InstallerPath -Wait
+# Живой тест пользователя: Start-Process -Wait зависал бесконечно (окно
+# cmd.exe так и не закрывалось), хотя мастер установки уже завершился —
+# задокументированная особенность -Wait с процессами, чей манифест
+# требует повышения прав (Setup.exe: PrivilegesRequired=admin) — Windows
+# может создать процесс, чей handle не тот, на который в итоге ждёт
+# -Wait. PassThru + явный WaitForExit() — рекомендуемый обход, ждёт
+# именно тот процесс, который реально был запущен.
+$proc = Start-Process -FilePath $InstallerPath -PassThru
+$proc.WaitForExit()

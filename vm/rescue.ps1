@@ -5,7 +5,9 @@
 #
 # Снимает: службу и xray.exe, WFP-фильтры/sublayer/provider по GUID,
 # правила брандмауэра по группе (альтернативный вариант kill-switch из 3.9),
-# адрес и маршруты TUN-адаптера, DNS на физических интерфейсах, планировщик
+# СВОИ маршруты по метке OwnRouteProtocol (хост-маршрут до сервера,
+# split-default /1+/1 — ревью п.23: без этого, если программа уже
+# удалена, снять их нечем), DNS на физических интерфейсах, планировщик
 # vt-rescue, и на всякий случай — заново включает отключённые сетевые
 # адаптеры и обновляет DHCP-аренду.
 #
@@ -155,6 +157,72 @@ public static class Wfp {
     $removed = [Wfp]::RemoveByProviderOrSublayer([Guid]$ProviderGuid, [Guid]$SublayerGuid, [ref]$log)
     Write-Host $log
     Write-Host "WFP filters removed: $removed"
+}
+
+# Ревью п.23: doctor продукта (NetworkDoctor.Run -> RouteManager.
+# RemoveOwnRoutes) снимает маршруты по этой же метке — но rescue.ps1
+# существует именно для случая "программы уже нет, звать doctor нечем"
+# (план, 3.9: "может выполняться и после того, как её файлы уже удалены
+# вручную"). Без этого шага хост-маршрут до сервера и split-default
+# /1+/1 могли остаться в таблице маршрутов навсегда. Перебор
+# GetIpForwardTable2 по системной таблице, тот же принцип, что и снятие
+# WFP-фильтров выше (не память процесса, не файлы программы).
+Step 'Снять СВОИ маршруты по метке OwnRouteProtocol (best-effort)' {
+    $src = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class Routes {
+    [DllImport("iphlpapi.dll")]
+    public static extern uint GetIpForwardTable2(ushort addressFamily, out IntPtr table);
+
+    [DllImport("iphlpapi.dll")]
+    public static extern void FreeMibTable(IntPtr table);
+
+    [DllImport("iphlpapi.dll")]
+    public static extern uint DeleteIpForwardEntry2(IntPtr route);
+
+    // MIB_IPFORWARD_ROW2 (netioapi.h): 104 байта на x64, Protocol на
+    // смещении 88 — оба числа сверены отдельным xunit-тестом
+    // (StructLayoutTests.Mib_ipforward_row2_is_104_bytes_with_documented_offsets)
+    // в основном коде продукта (VlessTunnel.Native), не по памяти здесь.
+    // Table[0] в MIB_IPFORWARD_TABLE2 начинается со смещения 8 (ULONG
+    // NumEntries + 4 байта паддинга до 8-байтового выравнивания NET_LUID).
+    private const int RowSize = 104;
+    private const int HeaderSize = 8;
+    private const int ProtocolOffset = 88;
+    public const int OwnRouteProtocol = 11000;
+
+    public static int RemoveOwnRoutes(out string log) {
+        var sb = new System.Text.StringBuilder();
+        int removed = 0;
+        IntPtr table;
+        uint hr = GetIpForwardTable2(0 /*AF_UNSPEC*/, out table);
+        if (hr != 0) { log = "GetIpForwardTable2 failed: 0x" + hr.ToString("X"); return -1; }
+        try {
+            int numEntries = Marshal.ReadInt32(table);
+            sb.AppendLine("routes enumerated: " + numEntries);
+            for (int i = 0; i < numEntries; i++) {
+                IntPtr row = new IntPtr(table.ToInt64() + HeaderSize + (long)i * RowSize);
+                int protocol = Marshal.ReadInt32(row, ProtocolOffset);
+                if (protocol != OwnRouteProtocol) continue;
+                uint dhr = DeleteIpForwardEntry2(row);
+                sb.AppendLine("route[" + i + "] delete=0x" + dhr.ToString("X"));
+                if (dhr == 0) removed++;
+            }
+        } finally {
+            FreeMibTable(table);
+        }
+        log = sb.ToString();
+        return removed;
+    }
+}
+'@
+    Add-Type -TypeDefinition $src -ErrorAction Stop
+    $log = ''
+    $removed = [Routes]::RemoveOwnRoutes([ref]$log)
+    Write-Host $log
+    Write-Host "Own routes removed: $removed"
 }
 
 Step 'Включить отключённые сетевые адаптеры' {
