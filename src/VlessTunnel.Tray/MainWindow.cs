@@ -210,7 +210,7 @@ public sealed class MainWindow : Form
     }
 
     // ------------------------------------------------------------- actions
-    private async Task ShowSetLinkDialogAsync(bool firstTime)
+    public async Task ShowSetLinkDialogAsync(bool firstTime)
     {
         using var dlg = new SetLinkDialog(firstTime);
         if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Link is null) return;
@@ -257,7 +257,7 @@ public sealed class MainWindow : Form
         }
     }
 
-    private async Task RunTestAsync()
+    public async Task RunTestAsync()
     {
         AppendLog("Проверяю туннель…");
         try
@@ -283,7 +283,7 @@ public sealed class MainWindow : Form
         }
     }
 
-    private async Task RunDoctorAsync()
+    public async Task RunDoctorAsync()
     {
         AppendLog("Собираю диагностику…");
         try
@@ -324,7 +324,7 @@ public sealed class MainWindow : Form
         }
     }
 
-    private void ShowLog()
+    public void ShowLog()
     {
         string text;
         lock (_logLock) { text = string.Join(Environment.NewLine, _log); }

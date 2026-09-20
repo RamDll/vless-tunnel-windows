@@ -1,3 +1,4 @@
+using System.Reflection;
 using VlessTunnel.Core.Ipc;
 
 namespace VlessTunnel.Tray;
@@ -5,8 +6,10 @@ namespace VlessTunnel.Tray;
 /// <summary>
 /// Значок трея + меню (план, 3.6) — по образцу <c>gui/vless-tunnel-tray.py</c>
 /// у Linux-версии: строка статуса сверху, включить/выключить, «Открыть
-/// окно», автозапуск, подменю «Ещё» (проверить/журнал/диагностика),
-/// выход. Состояние обновляется подпиской на события IPC
+/// окно», автозапуск, подменю «Ещё» (сменить сервер/проверить/журнал/
+/// диагностика/captive portal) — все реальные действия делегированы в
+/// <see cref="MainWindow"/> (одна реализация на оба меню), выход.
+/// Состояние обновляется подпиской на события IPC
 /// (<see cref="IpcClient.SubscribeAsync"/>), не опросом по таймеру —
 /// переподключается сама, если служба ещё не запущена или временно
 /// недоступна (значок "неизвестно" в это время).
@@ -41,9 +44,16 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_autostartItem);
 
         var more = new ToolStripMenuItem("Ещё");
-        more.DropDownItems.Add("Проверить туннель", null, (_, _) => ShowWindow());
-        more.DropDownItems.Add("Показать журнал", null, (_, _) => ShowWindow());
-        more.DropDownItems.Add("Диагностика", null, (_, _) => ShowWindow());
+        // Ревью (живой тест пользователя): раньше все три пункта ниже были
+        // заглушками ("открыть окно" вместо реального действия) — забыли
+        // дописать при переносе логики из MainWindow.BuildActionsMenu,
+        // который эти же самые команды уже давно умеет выполнять по-настоящему.
+        // Переиспользуем ЕГО методы (сделаны public), а не дублируем логику
+        // тут — одна реализация на оба меню (трей и окно).
+        more.DropDownItems.Add("Сменить сервер", null, async (_, _) => await _window.ShowSetLinkDialogAsync(firstTime: false));
+        more.DropDownItems.Add("Проверить туннель", null, async (_, _) => await _window.RunTestAsync());
+        more.DropDownItems.Add("Показать журнал", null, (_, _) => _window.ShowLog());
+        more.DropDownItems.Add("Диагностика", null, async (_, _) => await _window.RunDoctorAsync());
         more.DropDownItems.Add(new ToolStripSeparator());
         // Captive portal (план, 3.9) — прямой пункт трея, не через окно:
         // именно в момент "застрял на гостиничном Wi-Fi без интернета"
@@ -53,7 +63,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(more);
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Выход", null, (_, _) => ExitThread());
+        // Живой тест пользователя: "выход из трея не отключает текущий
+        // туннель" — раньше ExitThread() звался напрямую, туннель (и
+        // желаемое состояние "on", которое служба сама восстановит после
+        // перезагрузки) оставался как есть. Явно гасим перед выходом —
+        // best-effort, не блокируем закрытие трея, если служба не отвечает.
+        menu.Items.Add("Выход", null, async (_, _) => await ExitAsync());
 
         _notifyIcon = new NotifyIcon
         {
@@ -63,6 +78,19 @@ public sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = menu,
         };
         _notifyIcon.DoubleClick += (_, _) => ShowWindow();
+        // Живой тест пользователя: левый клик должен открывать то же меню,
+        // что и правый (сейчас — только правый, встроенным поведением
+        // NotifyIcon+ContextMenuStrip). Публичного API "показать меню
+        // прямо сейчас" у NotifyIcon нет — зовём ТОТ ЖЕ приватный метод,
+        // что и сам компонент вызывает внутри себя на правый клик, чтобы
+        // получить идентичное поведение (позиционирование, фокус, закрытие
+        // по клику вовне), а не переизобретать его через menu.Show(...).
+        _notifyIcon.MouseClick += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            typeof(NotifyIcon).GetMethod("ShowContextMenu", BindingFlags.NonPublic | BindingFlags.Instance)
+                ?.Invoke(_notifyIcon, null);
+        };
 
         _ = SubscribeLoopAsync(_cts.Token);
     }
@@ -112,6 +140,16 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _window.AppendLog($"Не удалось выключить туннель: {ex.Message}");
         }
+    }
+
+    private async Task ExitAsync()
+    {
+        try
+        {
+            await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.Off }, TimeSpan.FromSeconds(15));
+        }
+        catch { /* выходим в любом случае — служба могла быть уже недоступна */ }
+        ExitThread();
     }
 
     private async Task ToggleAsync()
