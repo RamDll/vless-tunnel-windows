@@ -154,11 +154,20 @@ Step 'Питание: без сна/гибернации' {
     powercfg /hibernate off
 }
 
-Step 'Defender: исключить C:\dev' {
+Step 'Defender: исключить C:\dev и папку установки продукта' {
+    # Ревью п.23 (живой тест): деинсталлятор теперь запускает из папки
+    # установки на 2 exe больше, чем раньше (off/close-tray, в дополнение
+    # к doctor), прямо перед тем, как Inno Setup пытается удалить файлы —
+    # Defender транзиентно сканирует только что выполненный exe и держит
+    # его залоченным ещё какое-то время после завершения процесса, из-за
+    # чего "папка установки удалена" стабильно не проходило (до 20с опроса
+    # не хватало). Это фикс СТЕНДА (быстрые повторные install/uninstall
+    # ради тестов) — не продукта: ставить исключение Defender конечному
+    # пользователю установщик не должен и не будет.
     $ok = $false
     for ($i = 0; $i -lt 5 -and -not $ok; $i++) {
         try {
-            Add-MpPreference -ExclusionPath 'C:\dev' -ErrorAction Stop
+            Add-MpPreference -ExclusionPath 'C:\dev', 'C:\Program Files\vless-tunnel' -ErrorAction Stop
             $ok = $true
         } catch {
             Start-Sleep -Seconds 5
