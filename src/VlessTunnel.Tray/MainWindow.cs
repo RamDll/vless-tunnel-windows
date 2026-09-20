@@ -443,7 +443,17 @@ public sealed class MainWindow : Form
             _autostartCheck.Checked = AutostartManager.IsEnabled();
             _autostartGuard = false;
 
-            _ = RefreshExternalIpAsync(active);
+            // Живой тест пользователя: первый подъём wintun-адаптера на
+            // свежей машине может занимать до пары минут (см.
+            // PLAN-windows.md, MaxXrayLaunchAttempts) — молчаливое
+            // "Включается…" на минуту-две выглядит как зависшая
+            // программа. Подменяем строку внешнего IP (всё равно ещё
+            // нечего проверять, пока туннель не поднят) на явную
+            // подсказку вместо "Внешний IP: проверяю…".
+            if (status.State == TunnelState.Starting)
+                _ipLabel.Text = "Первый запуск может занять до 2 минут";
+            else
+                _ = RefreshExternalIpAsync(active);
         }
         if (InvokeRequired) Invoke(Do); else Do();
     }
