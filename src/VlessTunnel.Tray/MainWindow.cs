@@ -243,13 +243,29 @@ public sealed class MainWindow : Form
         _powerButton.Enabled = false;
         try
         {
-            var resp = await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.Toggle }, TimeSpan.FromSeconds(90));
+            // 180с, не 90 — см. комментарий в VlessTunnel.Cli/Program.cs
+            // (тот же таймаут, тот же живой баг с MaxXrayLaunchAttempts).
+            var resp = await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.Toggle }, TimeSpan.FromSeconds(180));
             if (resp is { Ok: true, Status: { } s }) ApplyStatus(s);
-            else AppendLog($"Не удалось переключить туннель: {resp.Error}");
+            else
+            {
+                AppendLog($"Не удалось переключить туннель: {resp.Error}");
+                await RefreshStatusAsync();
+            }
         }
         catch (Exception ex)
         {
+            // Живой тест пользователя: клиентский таймаут/отмена ("The
+            // operation was canceled") не значит, что служба остановила
+            // попытку — она вполне могла продолжать (и даже успеть)
+            // независимо от ЭТОГО конкретного запроса. Раньше здесь
+            // только логировалось и кнопка включалась обратно, а текст
+            // статуса оставался замороженным на "Включается…" до
+            // следующего события подписки — несколько секунд кнопка и
+            // надпись показывали разные вещи. Спрашиваем текущее
+            // состояние явно, а не ждём подписку.
             AppendLog($"Не удалось переключить туннель: {ex.Message}");
+            await RefreshStatusAsync();
         }
         finally
         {

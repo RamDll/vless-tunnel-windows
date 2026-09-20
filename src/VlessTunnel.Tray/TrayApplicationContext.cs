@@ -156,7 +156,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         try
         {
-            await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.Toggle }, TimeSpan.FromSeconds(90));
+            // 180с, не 90 — см. комментарий в VlessTunnel.Cli/Program.cs
+            // (тот же таймаут, тот же живой баг с MaxXrayLaunchAttempts).
+            await _ipc.SendAsync(new IpcRequest { Cmd = IpcCommands.Toggle }, TimeSpan.FromSeconds(180));
         }
         catch (Exception ex)
         {

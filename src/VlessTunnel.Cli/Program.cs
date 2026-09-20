@@ -55,11 +55,17 @@ if (notYetImplemented.Contains(cmd))
 
 // План, 3.5: "Таймауты клиента IPC должны быть больше худшего пути
 // команды в службе" (урок Linux: toggle с таймаутом 30с при пути on >
-// 31с). У нас худший путь on — bootstrap-резолв + запуск xray + ожидание
-// адаптера (до 40с) + адрес/маршруты с повторами (до ~15с) + kill-switch.
+// 31с) — то же самое живьём поймано и здесь (ревью, живой тест
+// пользователя): MaxXrayLaunchAttempts подняли с 3 до 6, не подняв этот
+// таймаут — клиент отваливался по "The operation was canceled" ровно на
+// 90-й секунде, пока служба ещё честно повторяла попытки внутри. Худший
+// путь on теперь — bootstrap-резолв + до 6 попыток запуска xray (пять
+// быстрых провалов ~17с + один полный таймаут ожидания адаптера 40с =
+// ~125с) + адрес/маршруты с повторами (до ~15с) + kill-switch — с
+// запасом до 180с.
 var timeoutMs = cmd switch
 {
-    IpcCommands.On or IpcCommands.Off or IpcCommands.Toggle or IpcCommands.Restart => 90_000,
+    IpcCommands.On or IpcCommands.Off or IpcCommands.Toggle or IpcCommands.Restart => 180_000,
     IpcCommands.Doctor => 30_000,
     IpcCommands.Test => 40_000, // 4 проверки по ~6с таймаута каждая, последовательно
     IpcCommands.CaptivePortal => 10_000, // сама пауза — 5 минут, но снятие фильтров быстрое, ответ не ждёт истечения таймера
